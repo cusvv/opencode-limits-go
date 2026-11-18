@@ -6,9 +6,13 @@ import {
   type LimitCard,
   type LimitRow,
   type Locale,
+  type VisibleWindows,
+  type WindowKey,
   alertMessage,
+  cardText,
   emptyCard,
   estimateWindowPace,
+  filterStripRows,
   newAlerts,
   normalizeLocale,
   paceSummary,
@@ -35,12 +39,36 @@ type UpdateStatusInfo = {
 
 const PLACEMENTS = ["bottom", "top", "both", "titlebar", "hidden"] as const
 type Placement = (typeof PLACEMENTS)[number]
+type StripStyle = "bars_pct" | "text" | "bars"
+
+const SAMPLE_CARD: LimitCard = {
+  ok: true,
+  org: "OpenCode",
+  email: "",
+  checkedAt: "",
+  source: "",
+  tight: "",
+  error: "",
+  rows: [
+    { key: "rolling", label: "5h", used: 18, status: "ok", resetsAt: "", resetsIn: "" },
+    { key: "weekly", label: "1w", used: 42, status: "ok", resetsAt: "", resetsIn: "" },
+    { key: "monthly", label: "1m", used: 68, status: "ok", resetsAt: "", resetsIn: "" },
+  ],
+}
 
 const Prefs = Schema.Struct({
   placement: Schema.Literals(PLACEMENTS),
   showBars: Schema.Boolean,
   alerts: Schema.Boolean,
   autoUpdate: Schema.Boolean,
+})
+
+const StripPrefs = Schema.Struct({
+  show5h: Schema.Boolean,
+  show1w: Schema.Boolean,
+  show1m: Schema.Boolean,
+  showPercent: Schema.Boolean,
+  showLabels: Schema.Boolean,
 })
 
 function tone(used: number): string {
@@ -67,21 +95,28 @@ function LimitsStrip(props: {
   lang: Locale
   light: boolean
   showBars: boolean
+  showPercent: boolean
+  showLabels: boolean
+  visible: VisibleWindows
   variant: "bottom" | "top"
+  preview?: boolean
   onOpen: () => void
 }) {
-  const rows = () => props.card?.rows ?? []
+  const rows = () => filterStripRows(props.card?.rows ?? [], props.visible)
+  const effBars = () => props.showBars
+  const effPercent = () => props.showPercent || !effBars()
   const errorColor = () => (props.light ? "#b45309" : "#f59e0b")
   const prefix = () => (props.lang === "ru" ? "лимиты" : "limits")
   const noData = () => (props.lang === "ru" ? "нет данных" : "no data")
 
   const buttonStyle = () => {
+    const cursor = props.preview ? "default" : "pointer"
     if (props.variant === "top") {
       const border = props.light ? "rgba(0,0,0,.12)" : "rgba(255,255,255,.12)"
       const bg = props.light ? "rgba(0,0,0,.04)" : "rgba(255,255,255,.05)"
-      return `background:${bg};border:1px solid ${border};border-radius:6px;margin:0;color:inherit;font:inherit;cursor:pointer;display:inline-flex;align-items:center;gap:8px;padding:4px 8px;font-size:11px;line-height:1.2;white-space:nowrap;`
+      return `background:${bg};border:1px solid ${border};border-radius:6px;margin:0;color:inherit;font:inherit;cursor:${cursor};display:inline-flex;align-items:center;gap:8px;padding:4px 8px;font-size:11px;line-height:1.2;white-space:nowrap;`
     }
-    return "background:transparent;border:0;margin:0;color:inherit;font:inherit;cursor:pointer;display:inline-flex;align-items:center;gap:12px;padding:3px 10px;font-size:11px;white-space:nowrap;"
+    return `background:transparent;border:0;margin:0;color:inherit;font:inherit;cursor:${cursor};display:inline-flex;align-items:center;gap:12px;padding:3px 10px;font-size:11px;white-space:nowrap;`
   }
 
   return (
@@ -97,11 +132,15 @@ function LimitsStrip(props: {
         <For each={rows()}>
           {(row: LimitRow) => (
             <span style="display:inline-flex;align-items:center;gap:5px;">
-              <span style="opacity:.6;">{windowLabel(row, props.lang)}</span>
-              <Show when={props.showBars}>
+              <Show when={props.showLabels}>
+                <span style="opacity:.6;">{windowLabel(row, props.lang)}</span>
+              </Show>
+              <Show when={effBars()}>
                 <MiniBar used={row.used} width={props.variant === "top" ? 24 : 32} light={props.light} />
               </Show>
-              <span style="font-variant-numeric:tabular-nums;">{row.used}%</span>
+              <Show when={effPercent()}>
+                <span style="font-variant-numeric:tabular-nums;">{row.used}%</span>
+              </Show>
             </span>
           )}
         </For>
@@ -117,6 +156,13 @@ export default Plugin.define({
       showBars: true,
       alerts: true,
       autoUpdate: true,
+    }),
+    strip: Store.global(StripPrefs, {
+      show5h: true,
+      show1w: true,
+      show1m: true,
+      showPercent: true,
+      showLabels: true,
     }),
   },
   i18n: {
@@ -145,8 +191,17 @@ export default Plugin.define({
       "settings.placement.both": "Bottom + top bar",
       "settings.placement.titlebar": "Titlebar / sidebar button",
       "settings.placement.hidden": "Hidden (command only)",
-      "settings.bars.title": "Show mini progress bars",
-      "settings.bars.description": "Turn off for a compact text-only readout",
+      "settings.preview.label": "Preview",
+      "settings.windows.title": "Windows in strip",
+      "settings.windows.description": "Choose which quota windows appear on the bar (click widget for all)",
+      "settings.windows.all": "All",
+      "settings.style.title": "Indicator style",
+      "settings.style.description": "Choose between mini progress bars, text only, or bars only",
+      "settings.style.bars_pct": "Bar + %",
+      "settings.style.text": "Text only",
+      "settings.style.bars": "Bars only",
+      "settings.labels.title": "Show window labels",
+      "settings.labels.description": "Show 5h, 1w, 1m prefixes before each indicator",
       "settings.alerts.title": "Threshold alerts (80% / 100%)",
       "settings.alerts.description": "Show a toast when any quota window reaches 80% or 100%",
       "settings.autoUpdate.title": "Auto-update from GitHub",
@@ -189,8 +244,17 @@ export default Plugin.define({
       "settings.placement.both": "Снизу и сверху",
       "settings.placement.titlebar": "Кнопка в заголовке / сайдбаре",
       "settings.placement.hidden": "Скрыто (только /limits)",
-      "settings.bars.title": "Показывать мини-бары",
-      "settings.bars.description": "Отключите для компактного текстового вида",
+      "settings.preview.label": "Предпросмотр",
+      "settings.windows.title": "Окна в мини-барах",
+      "settings.windows.description": "Выберите, какие лимиты показывать на панели (по клику видны все)",
+      "settings.windows.all": "Все",
+      "settings.style.title": "Вид индикатора",
+      "settings.style.description": "Показывать бары с процентами, только текст или только бары",
+      "settings.style.bars_pct": "Бар + %",
+      "settings.style.text": "Без баров",
+      "settings.style.bars": "Только бары",
+      "settings.labels.title": "Показывать подписи окон",
+      "settings.labels.description": "Отображать префиксы 5ч, 1н, 1м перед значениями",
       "settings.alerts.title": "Уведомления о порогах (80% / 100%)",
       "settings.alerts.description": "Показывать тост, когда окно доходит до 80% или 100%",
       "settings.autoUpdate.title": "Автообновление с GitHub",
@@ -212,6 +276,7 @@ export default Plugin.define({
   setup(ctx) {
     const ui = ctx.ui
     const prefs = ctx.stores.prefs
+    const strip = ctx.stores.strip
     const [card, setCard] = createSignal<LimitCard | null>(null)
     const [ready, setReady] = createSignal(false)
     const [refreshing, setRefreshing] = createSignal(false)
@@ -222,6 +287,53 @@ export default Plugin.define({
 
     const lang = (): Locale => normalizeLocale(ctx.locale.locale())
     const light = () => ctx.appearance.mode() === "light"
+
+    const visibleWindows = (): VisibleWindows => ({
+      rolling: strip.value.show5h,
+      weekly: strip.value.show1w,
+      monthly: strip.value.show1m,
+    })
+
+    const activeWindowCount = () =>
+      Number(strip.value.show5h) + Number(strip.value.show1w) + Number(strip.value.show1m)
+
+    function toggleWindow(key: WindowKey) {
+      const v = visibleWindows()
+      if (v[key] && activeWindowCount() <= 1) return
+      strip.update((draft) => {
+        if (key === "rolling") draft.show5h = !draft.show5h
+        else if (key === "weekly") draft.show1w = !draft.show1w
+        else draft.show1m = !draft.show1m
+      })
+    }
+
+    function showAllWindows() {
+      strip.update((draft) => {
+        draft.show5h = true
+        draft.show1w = true
+        draft.show1m = true
+      })
+    }
+
+    const stripStyle = (): StripStyle => {
+      if (!prefs.value.showBars) return "text"
+      return strip.value.showPercent ? "bars_pct" : "bars"
+    }
+
+    function setStripStyle(next: StripStyle) {
+      prefs.update((draft) => {
+        draft.showBars = next !== "text"
+      })
+      strip.update((draft) => {
+        draft.showPercent = next !== "bars"
+      })
+    }
+
+    const stripTooltip = () => {
+      const c = card()
+      const base = ctx.t("command.limits")
+      return c?.ok ? `${base} · ${cardText(c, lang())}` : base
+    }
 
     const placementOptions = () => [
       { value: "bottom" as const, label: ctx.t("settings.placement.bottom") },
@@ -396,8 +508,43 @@ export default Plugin.define({
     }
 
     function DisplayFields(props: { page?: boolean }) {
+      const previewCard = () => (card()?.ok ? card()! : SAMPLE_CARD)
+      const previewBoxStyle = () => {
+        const border = light() ? "rgba(0,0,0,.12)" : "rgba(255,255,255,.12)"
+        const bg = light() ? "rgba(0,0,0,.03)" : "rgba(255,255,255,.03)"
+        return `display:inline-flex;align-items:center;padding:3px 6px;border-radius:8px;border:1px solid ${border};background:${bg};`
+      }
+      const winItems: Array<{ key: WindowKey; active: () => boolean }> = [
+        { key: "rolling", active: () => strip.value.show5h },
+        { key: "weekly", active: () => strip.value.show1w },
+        { key: "monthly", active: () => strip.value.show1m },
+      ]
+      const styleItems: StripStyle[] = ["bars_pct", "text", "bars"]
+
       return (
         <>
+          <SettingField
+            page={props.page}
+            id="zen-limits-preview"
+            title={ctx.t("settings.preview.label")}
+            description={ctx.t(`settings.placement.${prefs.value.placement}`)}
+          >
+            <div style={previewBoxStyle()}>
+              <LimitsStrip
+                card={previewCard()}
+                ready={true}
+                lang={lang()}
+                light={light()}
+                showBars={prefs.value.showBars}
+                showPercent={strip.value.showPercent}
+                showLabels={strip.value.showLabels}
+                visible={visibleWindows()}
+                variant={prefs.value.placement === "top" ? "top" : "bottom"}
+                preview
+                onOpen={() => {}}
+              />
+            </div>
+          </SettingField>
           <SettingField
             page={props.page}
             id="zen-limits-placement"
@@ -413,15 +560,60 @@ export default Plugin.define({
           </SettingField>
           <SettingField
             page={props.page}
-            id="zen-limits-bars"
-            title={ctx.t("settings.bars.title")}
-            description={ctx.t("settings.bars.description")}
+            id="zen-limits-windows"
+            title={ctx.t("settings.windows.title")}
+            description={ctx.t("settings.windows.description")}
+          >
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
+              <For each={winItems}>
+                {(item) => (
+                  <ui.Button
+                    size="small"
+                    variant={item.active() ? "contrast" : "neutral"}
+                    onClick={() => toggleWindow(item.key)}
+                  >
+                    {windowLabel({ key: item.key, label: item.key }, lang())}
+                  </ui.Button>
+                )}
+              </For>
+              <Show when={activeWindowCount() < 3}>
+                <ui.Button size="small" variant="ghost" onClick={showAllWindows}>
+                  {ctx.t("settings.windows.all")}
+                </ui.Button>
+              </Show>
+            </div>
+          </SettingField>
+          <SettingField
+            page={props.page}
+            id="zen-limits-style"
+            title={ctx.t("settings.style.title")}
+            description={ctx.t("settings.style.description")}
+          >
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
+              <For each={styleItems}>
+                {(item) => (
+                  <ui.Button
+                    size="small"
+                    variant={stripStyle() === item ? "contrast" : "neutral"}
+                    onClick={() => setStripStyle(item)}
+                  >
+                    {ctx.t(`settings.style.${item}`)}
+                  </ui.Button>
+                )}
+              </For>
+            </div>
+          </SettingField>
+          <SettingField
+            page={props.page}
+            id="zen-limits-labels"
+            title={ctx.t("settings.labels.title")}
+            description={ctx.t("settings.labels.description")}
           >
             <ui.Switch
-              label={ctx.t("settings.bars.title")}
+              label={ctx.t("settings.labels.title")}
               hideLabel
-              checked={prefs.value.showBars}
-              onChange={(checked) => prefs.update((draft) => { draft.showBars = checked })}
+              checked={strip.value.showLabels}
+              onChange={(checked) => strip.update((draft) => { draft.showLabels = checked })}
             />
           </SettingField>
         </>
@@ -537,7 +729,7 @@ export default Plugin.define({
             </div>
           }
         >
-          <div style="display:flex;flex-direction:column;gap:14px;min-width:420px;">
+          <div style="display:flex;flex-direction:column;gap:14px;min-width:460px;">
             <DisplayFields />
             <NotificationFields />
             <UpdateFields />
@@ -710,10 +902,22 @@ export default Plugin.define({
           keywords: "position bottom top header titlebar sidebar",
         },
         {
-          id: "zen-limits-bars",
-          title: ctx.t("settings.bars.title"),
-          description: ctx.t("settings.bars.description"),
-          keywords: "bars compact progress",
+          id: "zen-limits-windows",
+          title: ctx.t("settings.windows.title"),
+          description: ctx.t("settings.windows.description"),
+          keywords: "windows 5h 1w 1m filter show hide rolling weekly monthly",
+        },
+        {
+          id: "zen-limits-style",
+          title: ctx.t("settings.style.title"),
+          description: ctx.t("settings.style.description"),
+          keywords: "bars text percent compact progress style",
+        },
+        {
+          id: "zen-limits-labels",
+          title: ctx.t("settings.labels.title"),
+          description: ctx.t("settings.labels.description"),
+          keywords: "labels prefix 5h 1w 1m minimal",
         },
         {
           id: "zen-limits-alerts",
@@ -770,13 +974,16 @@ export default Plugin.define({
       at: "window.bottom",
       render: () => (
         <Show when={showBottom()}>
-          <ui.Tooltip value={ctx.t("command.limits")} keys={ctx.keybinds.keybind(`${ctx.id}.limits`)}>
+          <ui.Tooltip value={stripTooltip()} keys={ctx.keybinds.keybind(`${ctx.id}.limits`)}>
             <LimitsStrip
               card={card()}
               ready={ready()}
               lang={lang()}
               light={light()}
               showBars={prefs.value.showBars}
+              showPercent={strip.value.showPercent}
+              showLabels={strip.value.showLabels}
+              visible={visibleWindows()}
               variant="bottom"
               onOpen={() => void showLimits(true)}
             />
@@ -790,13 +997,16 @@ export default Plugin.define({
       order: 20,
       render: (input) => (
         <Show when={showTop() && input.active}>
-          <ui.Tooltip value={ctx.t("command.limits")} keys={ctx.keybinds.keybind(`${ctx.id}.limits`)}>
+          <ui.Tooltip value={stripTooltip()} keys={ctx.keybinds.keybind(`${ctx.id}.limits`)}>
             <LimitsStrip
               card={card()}
               ready={ready()}
               lang={lang()}
               light={light()}
               showBars={prefs.value.showBars && !input.compact}
+              showPercent={strip.value.showPercent || input.compact}
+              showLabels={strip.value.showLabels}
+              visible={visibleWindows()}
               variant="top"
               onOpen={() => void showLimits(true)}
             />
@@ -809,13 +1019,17 @@ export default Plugin.define({
       if (prefs.value.placement !== "titlebar") return undefined
       const current = card()
       const l = lang()
+      const rows = current?.ok ? filterStripRows(current.rows, visibleWindows()) : []
       const label = current?.ok
-        ? current.rows.map((r) => `${windowLabel(r, l)} ${r.used}%`).join(" · ")
+        ? rows
+            .map((r) => (strip.value.showLabels ? `${windowLabel(r, l)} ${r.used}%` : `${r.used}%`))
+            .join(" · ")
         : `${l === "ru" ? "лимиты" : "limits"}: ${ready() ? current?.error || "—" : "…"}`
+      const fullTitle = current?.ok ? `${ctx.t("command.limits")}: ${cardText(current, l)}` : `${ctx.t("command.limits")}: ${label}`
       return {
         id: "limits",
         label,
-        title: `${ctx.t("command.limits")}: ${label}`,
+        title: fullTitle,
         icon: "status",
         run: () => void showLimits(true),
       }

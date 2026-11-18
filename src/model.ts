@@ -54,9 +54,24 @@ const WINDOW_BY_LABEL = new Map<string, (typeof WINDOWS)[number]>(
   ]),
 )
 
+export function rowWindowKey(row: Pick<LimitRow, "key" | "label">): WindowKey | undefined {
+  return row.key ?? WINDOW_BY_LABEL.get(row.label)?.key
+}
+
 export function windowLabel(row: Pick<LimitRow, "key" | "label">, lang: Locale = "en"): string {
   const entry = (row.key ? WINDOW_BY_KEY.get(row.key) : undefined) ?? WINDOW_BY_LABEL.get(row.label)
   return entry ? entry.labels[lang] : row.label
+}
+
+export type VisibleWindows = Record<WindowKey, boolean>
+
+export function filterStripRows(rows: readonly LimitRow[], visible: VisibleWindows): LimitRow[] {
+  if (!rows.length) return []
+  const filtered = rows.filter((row) => {
+    const key = rowWindowKey(row)
+    return key ? visible[key] : true
+  })
+  return filtered.length ? filtered : [...rows]
 }
 
 export function formatError(code: ErrorCode | undefined, detail: string | undefined, lang: Locale = "en"): string {
@@ -312,7 +327,7 @@ const WINDOW_DURATION_MS: Record<WindowKey, number> = {
 
 // Estimate consumption pace while suppressing early-window noise (<1% elapsed or small bursts).
 export function estimateWindowPace(row: LimitRow, now = Date.now(), lang: Locale = "en"): WindowPace | null {
-  const key = row.key ?? WINDOW_BY_LABEL.get(row.label)?.key
+  const key = rowWindowKey(row)
   if (!key) return null
   const resetsAtMs = row.resetsAtMs ?? 0
   if (resetsAtMs <= 0) return null

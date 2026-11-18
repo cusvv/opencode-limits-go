@@ -19,9 +19,10 @@ Displays live usage across all three OpenCode Go windows — **5-hour rolling**,
 - **Desktop GUI**:
   - Clickable status strip with color-coded progress bars (green `< 80%`, amber `80–99%`, red `100%`)
   - **Quick OpenCode Console access**: Direct button in the limits dialog and Settings page to open `https://opencode.ai/console`
-  - **Settings window** (`/limits-settings`, gear button in the limits dialog, and native `Settings → OpenCode Go limits`)
+  - **Settings window** (`/limits-settings`, gear button in the limits dialog, and native `Settings → OpenCode Go limits`) with a live strip preview
   - **Placement options**: Bottom bar (default), Top bar (`session.header`), Both, Titlebar / sidebar button, or Hidden
-  - Toggleable mini progress bars and 80% / 100% threshold toasts
+  - **Custom strip layout**: Show/hide individual windows (`5h`, `1w`, `1m`), switch indicator style (`Bar + %`, `Text only`, `Bars only`), toggle window labels, and hover for the full breakdown
+  - 80% / 100% threshold toasts
   - Light & dark theme support
 - **TUI**:
   - Live sidebar indicator (`sidebar.content`) with semantic theme colors

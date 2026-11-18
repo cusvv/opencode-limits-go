@@ -290,3 +290,20 @@ test("cardDetail appends smart pace line when significant", async () => {
   assert.ok(detailEn.includes("Pace (1w):"))
   assert.ok(detailRu.includes("Темп (1н):"))
 })
+
+test("filterStripRows selects enabled windows and falls back if none are selected", async () => {
+  const { filterStripRows, rowWindowKey } = await import("./model.ts")
+  const rows = [
+    { key: "rolling" as const, label: "5h", used: 12, status: "ok", resetsAt: "", resetsIn: "" },
+    { label: "1н", used: 40, status: "ok", resetsAt: "", resetsIn: "" },
+    { key: "monthly" as const, label: "1m", used: 65, status: "ok", resetsAt: "", resetsIn: "" },
+  ]
+
+  assert.equal(rowWindowKey(rows[1]), "weekly")
+
+  const only5h = filterStripRows(rows, { rolling: true, weekly: false, monthly: false })
+  assert.deepEqual(only5h.map((r) => r.label), ["5h"])
+
+  const fallbackAll = filterStripRows(rows, { rolling: false, weekly: false, monthly: false })
+  assert.equal(fallbackAll.length, 3)
+})
