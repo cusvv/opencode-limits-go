@@ -43,7 +43,15 @@ Displays live usage across all three OpenCode Go windows — **5-hour rolling**,
 
 Requires **OpenCode v2.3.0+** and an active OpenCode Go credential (via `opencode auth login` or `OPENCODE_API_KEY`).
 
-### Option 1: Clone with Git (recommended)
+### Option 1: Quick Install via OpenCode CLI (recommended)
+
+```sh
+opencode plugin add github:cusvv/zen-limits
+```
+
+Then restart **OpenCode Desktop** (or run `/reload` in open TUI sessions).
+
+### Option 2: Clone with Git
 
 ```sh
 # macOS / Linux
@@ -55,16 +63,16 @@ git clone https://github.com/cusvv/zen-limits.git ~/.config/opencode/local-plugi
 git clone https://github.com/cusvv/zen-limits.git "$env:USERPROFILE\.config\opencode\local-plugins\zen-limits"
 ```
 
-### Option 2: Download Release Archive
+### Option 3: Download Release Archive
 
 Download `zen-limits.zip` or `zen-limits.tar.gz` from the [Releases](https://github.com/cusvv/zen-limits/releases) page and extract it so the folder is:
 
 - Windows: `%USERPROFILE%\.config\opencode\local-plugins\zen-limits`
 - macOS / Linux: `~/.config/opencode/local-plugins/zen-limits`
 
-### Enable in `opencode.json`
+### Enable in `opencode.json` (Options 2 & 3)
 
-Add `./local-plugins/zen-limits` to `plugins` in your global `~/.config/opencode/opencode.json`:
+For manual installs, add `./local-plugins/zen-limits` to `plugins` in your global `~/.config/opencode/opencode.json`:
 
 ```jsonc
 {
