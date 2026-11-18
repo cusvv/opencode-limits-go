@@ -1,5 +1,10 @@
 # zen-limits
 
+[![Release](https://img.shields.io/github/v/release/cusvv/zen-limits?style=flat-square)](https://github.com/cusvv/zen-limits/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+[![OpenCode](https://img.shields.io/badge/OpenCode-v2.3%2B-111827?style=flat-square)](https://opencode.ai)
+[![Language](https://img.shields.io/badge/Lang-EN%20%7C%20RU-16a34a?style=flat-square)](#features)
+
 **OpenCode Go** quota monitor plugin for **OpenCode v2.3+** (TUI & Desktop GUI).
 
 Displays live usage across all three OpenCode Go windows — **5-hour rolling**, **weekly**, and **monthly** — with threshold alerts, flexible placement in Desktop GUI, automatic English/Russian localization matching your OpenCode UI language, and built-in GitHub auto-updates.
