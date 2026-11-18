@@ -5,19 +5,27 @@ import { log } from "./log.ts"
 import {
   type LimitCard,
   type Locale,
+  type VisibleWindows,
   alertMessage,
   cardDetail,
   cardText,
   emptyCard,
   errorText,
+  filterStripRows,
   newAlerts,
   normalizeLocale,
   retry,
+  windowLabel,
 } from "./model.ts"
 
 const COPY = {
   en: {
     title: "OpenCode Go limits",
+    windowsTitle: "OpenCode Go limits: sidebar windows",
+    allWindows: "All windows (5h · 1w · 1m)",
+    only5h: "Only 5h",
+    only1w: "Only 1w",
+    only1m: "Only 1m",
     loading: "limits: …",
     noServer: "cannot reach plugin server",
     failed: "Failed to load limits",
@@ -25,6 +33,11 @@ const COPY = {
   },
   ru: {
     title: "Лимиты OpenCode Go",
+    windowsTitle: "Лимиты OpenCode Go: окна в панели",
+    allWindows: "Все окна (5ч · 1н · 1м)",
+    only5h: "Только 5ч",
+    only1w: "Только 1н",
+    only1m: "Только 1м",
     loading: "лимиты: …",
     noServer: "нет связи с сервером плагина",
     failed: "Не удалось получить лимиты",
@@ -41,6 +54,10 @@ export default Plugin.define({
         : process.env.OPENCODE_LANG || process.env.LC_ALL || process.env.LANG,
     )
     const copy = COPY[lang]
+
+    const [tuiPrefs, setTuiPrefs] = ctx.storage.store<VisibleWindows>("opencode-limits-go.tui", {
+      initial: { rolling: true, weekly: true, monthly: true },
+    })
 
     const [card, setCard] = createSignal<LimitCard | null>(null)
     const notified = new Map<string, number>()
@@ -77,7 +94,11 @@ export default Plugin.define({
 
     const text = () => {
       const current = card()
-      return current ? cardText(current, lang) : copy.loading
+      if (!current) return copy.loading
+      if (!current.ok) return cardText(current, lang)
+      return filterStripRows(current.rows, tuiPrefs)
+        .map((row) => `${windowLabel(row, lang)} ${row.used}%`)
+        .join(" · ")
     }
 
     const fgColor = () => {
@@ -150,6 +171,29 @@ export default Plugin.define({
             ctx.ui.dialog.alert({
               title: `OpenCode Go · ${result.org}${result.email ? ` · ${result.email}` : ""}`,
               message: cardDetail(result, Date.now(), lang),
+            })
+          },
+        },
+        {
+          id: "opencode-limits-go.windows",
+          title: copy.windowsTitle,
+          palette: true,
+          slash: { name: "limits-windows" },
+          run: async () => {
+            const picked = await ctx.ui.dialog.select<VisibleWindows>({
+              title: copy.windowsTitle,
+              options: [
+                { title: copy.allWindows, value: { rolling: true, weekly: true, monthly: true } },
+                { title: copy.only5h, value: { rolling: true, weekly: false, monthly: false } },
+                { title: copy.only1w, value: { rolling: false, weekly: true, monthly: false } },
+                { title: copy.only1m, value: { rolling: false, weekly: false, monthly: true } },
+              ],
+            })
+            if (!picked) return
+            await setTuiPrefs((draft) => {
+              draft.rolling = picked.rolling
+              draft.weekly = picked.weekly
+              draft.monthly = picked.monthly
             })
           },
         },

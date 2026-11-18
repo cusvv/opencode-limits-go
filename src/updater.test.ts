@@ -7,6 +7,7 @@ import {
   copyVerifiedPlugin,
   createUpdater,
   findVerifiedPluginRoot,
+  isPackageManagerInstall,
   isTrustedGitHubUrl,
   pickReleaseDownload,
 } from "./updater.ts"
@@ -122,6 +123,43 @@ test("createUpdater detects newer release and auto-installs once", async () => {
     assert.equal(res.updateAvailable, false)
     assert.equal(notified, "1.5.1")
     assert.equal(JSON.parse(await readFile(path.join(tmp, "package.json"), "utf8")).version, "1.5.1")
+  } finally {
+    await rm(tmp, { recursive: true, force: true })
+  }
+})
+
+test("isPackageManagerInstall skips GitHub file overwrite when inside OpenCode npm cache", async () => {
+  const pkgPath = path.join(os.tmpdir(), ".cache", "opencode", "npm", "opencode-limits-go@latest", "node_modules", "opencode-limits-go")
+  assert.equal(isPackageManagerInstall(pkgPath), true)
+  assert.equal(isPackageManagerInstall(path.join(os.tmpdir(), "local-plugins", "opencode-limits-go")), false)
+
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "opencode-limits-go-pm-"))
+  const managedRoot = path.join(tmp, ".cache", "opencode", "npm", "opencode-limits-go@latest", "1", "node_modules", "opencode-limits-go")
+  try {
+    await mkdir(managedRoot, { recursive: true })
+    await writeFile(path.join(managedRoot, "package.json"), JSON.stringify({ name: "opencode-limits-go", version: "1.5.0" }))
+
+    const updater = createUpdater({
+      pluginRoot: managedRoot,
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            tag_name: "v1.6.0",
+            html_url: "https://github.com/cusvv/opencode-limits-go/releases/tag/v1.6.0",
+          }),
+          { status: 200 },
+        ),
+    })
+
+    const res = await updater.check({ force: true, autoInstall: true })
+    assert.equal(res.managedByPackageManager, true)
+    assert.equal(res.updateAvailable, true)
+    assert.equal(res.autoUpdated, false)
+    assert.equal(res.restartRequired, false)
+
+    const manual = await updater.install()
+    assert.equal(manual.ok, false)
+    assert.ok(manual.error.includes("opencode plugin update"))
   } finally {
     await rm(tmp, { recursive: true, force: true })
   }

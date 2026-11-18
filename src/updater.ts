@@ -36,9 +36,17 @@ export type UpdateStatus = {
   updateAvailable: boolean
   autoUpdated: boolean
   restartRequired: boolean
+  managedByPackageManager: boolean
   releaseUrl: string
   checkedAtMs: number
   error: string
+}
+
+export function isPackageManagerInstall(pluginRoot: string): boolean {
+  const resolved = path.resolve(pluginRoot)
+  return /[\\/]\.cache[\\/]opencode[\\/]npm[\\/]|[\\/]node_modules[\\/]opencode-(?:zen-limits|limits-go)$/i.test(
+    resolved,
+  )
 }
 
 export type InstallResult = {
@@ -201,6 +209,7 @@ export async function copyVerifiedPlugin(srcRoot: string, destRoot: string): Pro
 
 export function createUpdater(deps: UpdaterDeps = {}) {
   const pluginRoot = deps.pluginRoot ?? defaultPluginRoot()
+  const managedByPackageManager = isPackageManagerInstall(pluginRoot)
   const fetchFn = deps.fetchFn ?? fetch
   const extractFn = deps.extractFn ?? defaultExtractArchive
   const nowFn = deps.nowFn ?? Date.now
@@ -322,7 +331,7 @@ export function createUpdater(deps: UpdaterDeps = {}) {
         let autoUpdated = false
         let installError = ""
 
-        if (release && updateAvailable && opts.autoInstall && !installedVersion) {
+        if (release && updateAvailable && opts.autoInstall && !installedVersion && !managedByPackageManager) {
           const installed = await installFromRelease(release, latestVersion)
           autoUpdated = installed.ok
           if (!installed.ok) installError = installed.error
@@ -334,6 +343,7 @@ export function createUpdater(deps: UpdaterDeps = {}) {
           updateAvailable: updateAvailable && !autoUpdated && !installedVersion,
           autoUpdated,
           restartRequired: !!installedVersion,
+          managedByPackageManager,
           releaseUrl,
           checkedAtMs: nowFn(),
           error: installError,
@@ -349,6 +359,7 @@ export function createUpdater(deps: UpdaterDeps = {}) {
           updateAvailable: lastStatus?.updateAvailable ?? false,
           autoUpdated: false,
           restartRequired: !!installedVersion,
+          managedByPackageManager,
           releaseUrl: lastStatus?.releaseUrl || `https://github.com/${REPO}/releases`,
           checkedAtMs: nowFn(),
           error: msg,
@@ -369,6 +380,14 @@ export function createUpdater(deps: UpdaterDeps = {}) {
   async function install(): Promise<InstallResult> {
     if (installedVersion) {
       return { ok: true, version: installedVersion, restartRequired: true, error: "" }
+    }
+    if (managedByPackageManager) {
+      return {
+        ok: false,
+        version: "",
+        restartRequired: false,
+        error: "Managed by OpenCode package manager. Run: opencode plugin update",
+      }
     }
     const status = await check({ force: true, autoInstall: false })
     if (status.error && !lastRelease) {

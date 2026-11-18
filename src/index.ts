@@ -9,22 +9,28 @@ import {
   type LimitCard,
   type LimitRow,
   type Locale,
+  type UsageSnapshot,
+  attachHistoryDeltas,
   emptyCard,
   errorText,
   formatError,
   localizeRows,
   normalizeLocale,
   parseUsage,
+  recordUsageSnapshot,
   tightLine,
 } from "./model.ts"
 import { createUpdater } from "./updater.ts"
 
 const TTL = 90_000
-const NEGATIVE_TTL = 60_000
+const NEGATIVE_TTL = 25_000
 const DEADLINE = 25_000
 const HTTP_TIMEOUT = 10_000
 const INITIAL_UPDATE_DELAY_MS = 15_000
 const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000
+const USAGE_EVENT_COOLDOWN_MS = 12_000
+const USAGE_EVENT_DEBOUNCE_MS = 1_500
+const HISTORY_KEY = "history:v1"
 
 type CachedRaw =
   | {
@@ -61,12 +67,12 @@ function defaultLocale(): Locale {
   return normalizeLocale(envLang)
 }
 
-function formatCached(entry: CachedRaw, lang: Locale): LimitCard {
+function formatCached(entry: CachedRaw, lang: Locale, history: readonly UsageSnapshot[]): LimitCard {
   if (!entry.ok) {
     return emptyCard(formatError(entry.errorCode, entry.errorDetail, lang))
   }
   const now = Date.now()
-  const rows = localizeRows(entry.rows, now, lang)
+  const rows = attachHistoryDeltas(localizeRows(entry.rows, now, lang), history, now)
   return {
     ok: true,
     org: entry.org,
@@ -77,6 +83,7 @@ function formatCached(entry: CachedRaw, lang: Locale): LimitCard {
     rows,
     tight: tightLine(rows, now, lang),
     error: "",
+    snapshots: history.slice(-24),
   }
 }
 
@@ -92,6 +99,11 @@ export default Plugin.define({
     let cache: CachedRaw | null = null
     let inflight: Promise<CachedRaw> | null = null
     let rpcRef: { events: { emit: (name: "changed" | "updated", data: any) => Promise<void> } } | null = null
+
+    const savedHistory = await ctx.storage.get(HISTORY_KEY).catch(() => undefined)
+    let history: UsageSnapshot[] = Array.isArray(savedHistory)
+      ? (savedHistory as UsageSnapshot[]).filter((s) => s && typeof s.at === "number")
+      : []
 
     const savedAuto = await ctx.storage.get("autoUpdate").catch(() => undefined)
     let autoUpdate =
@@ -183,12 +195,17 @@ export default Plugin.define({
     }
 
     async function status(input: unknown): Promise<LimitCard> {
-      const parsed = (input ?? {}) as { force?: boolean; lang?: string }
+      const parsed = (input ?? {}) as { force?: boolean; lang?: string; maxAgeMs?: number }
       const force = parsed.force === true
       const lang = parsed.lang ? normalizeLocale(parsed.lang) : defaultLocale()
+      const requestedMaxAge =
+        typeof parsed.maxAgeMs === "number" && Number.isFinite(parsed.maxAgeMs)
+          ? Math.max(10_000, Math.min(parsed.maxAgeMs, TTL))
+          : undefined
 
-      if (!force && cache && Date.now() - cache.at < cache.ttl) {
-        return formatCached(cache, lang)
+      const effectiveTtl = cache ? (requestedMaxAge ? Math.min(cache.ttl, requestedMaxAge) : cache.ttl) : 0
+      if (!force && cache && Date.now() - cache.at < effectiveTtl) {
+        return formatCached(cache, lang, history)
       }
 
       if (!inflight) {
@@ -197,6 +214,13 @@ export default Plugin.define({
           if (!stopEvents.signal.aborted || next.ok) {
             cache = next
           }
+          if (next.ok) {
+            const nextHistory = recordUsageSnapshot(history, next.rows, next.checkedAtMs)
+            if (nextHistory.length !== history.length || nextHistory[nextHistory.length - 1] !== history[history.length - 1]) {
+              history = nextHistory
+              void ctx.storage.set(HISTORY_KEY, history as unknown as any).catch(() => {})
+            }
+          }
           return next
         })().finally(() => {
           inflight = null
@@ -204,7 +228,7 @@ export default Plugin.define({
       }
 
       const raw = await inflight
-      return formatCached(raw, lang)
+      return formatCached(raw, lang, history)
     }
 
     async function updateStatus(input: unknown) {
@@ -250,13 +274,40 @@ export default Plugin.define({
     }, UPDATE_INTERVAL_MS)
     periodicTimer.unref?.()
 
+    let usageDebounce: ReturnType<typeof setTimeout> | null = null
+    let lastUsageEmitAt = 0
+
     if (typeof ctx.event?.subscribe === "function") {
       void (async () => {
         try {
-          for await (const _ of ctx.event.subscribe({
-            types: ["credential.updated", "credential.switched", "integration.updated", "config.updated"],
+          for await (const ev of ctx.event.subscribe({
+            types: [
+              "credential.updated",
+              "credential.switched",
+              "integration.updated",
+              "config.updated",
+              "provider.updated",
+              "session.usage.updated",
+              "session.idle",
+            ],
             signal: stopEvents.signal,
           })) {
+            const type = (ev as { type?: string })?.type ?? ""
+            if (type === "session.usage.updated" || type === "session.idle") {
+              if (usageDebounce) clearTimeout(usageDebounce)
+              usageDebounce = setTimeout(() => {
+                usageDebounce = null
+                if (stopEvents.signal.aborted) return
+                const now = Date.now()
+                if (now - lastUsageEmitAt < USAGE_EVENT_COOLDOWN_MS) return
+                if (cache && now - cache.at < USAGE_EVENT_COOLDOWN_MS) return
+                lastUsageEmitAt = now
+                cache = null
+                void rpc.events.emit("changed", {}).catch(() => {})
+              }, USAGE_EVENT_DEBOUNCE_MS)
+              usageDebounce.unref?.()
+              continue
+            }
             cache = null
             creds.dropCli()
             void rpc.events.emit("changed", {}).catch(() => {})
@@ -270,6 +321,7 @@ export default Plugin.define({
     return () => {
       clearTimeout(startupTimer)
       clearInterval(periodicTimer)
+      if (usageDebounce) clearTimeout(usageDebounce)
       stopEvents.abort()
     }
   },

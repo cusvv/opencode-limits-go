@@ -1,6 +1,7 @@
 # opencode-limits-go
 
 [![Release](https://img.shields.io/github/v/release/cusvv/opencode-limits-go?style=flat-square)](https://github.com/cusvv/opencode-limits-go/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/cusvv/opencode-limits-go/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/cusvv/opencode-limits-go/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/opencode-limits-go?style=flat-square)](https://www.npmjs.com/package/opencode-limits-go)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
 [![OpenCode](https://img.shields.io/badge/OpenCode-v2.3%2B-111827?style=flat-square)](https://opencode.ai)
@@ -14,8 +15,9 @@ Displays live usage across all three OpenCode Go windows — **5-hour rolling**,
 
 ## Features
 
-- **All OpenCode Go windows**: `5h` / `1w` / `1m` percentages, reset timestamps, countdowns, and tightest-window summary.
-- **Smart pace estimation**: Noise-filtered burn-rate projection for `5h`, `1w`, and `1m` windows — suppresses tiny early-window fluctuations, flags fast bursts, and estimates time to exhaustion vs. reset.
+- **All OpenCode Go windows**: `5h` / `1w` / `1m` percentages, reset timestamps, countdowns, elapsed-time markers (`|`), recent `~1h` deltas, and tightest-window summary.
+- **Smart pace estimation v2**: Combines window-average and local snapshot history to suppress tiny spikes while catching fresh coding bursts across `5h`, `1w`, and `1m`.
+- **OpenCode Zen & today's activity**: Displays active Console budgets (`$spent / $limit`) and today's local `opencode-go` tokens vs. `opencode` (Zen) USD spend inside the dialog and hover tooltip.
 - **Works with any OpenCode auth setup**:
   - OpenCode Console **OAuth** account (`opencode`)
   - Saved **API key** (`opencode-go` or `opencode` integration)
@@ -23,17 +25,17 @@ Displays live usage across all three OpenCode Go windows — **5-hour rolling**,
   - Plugin options or provider settings in `opencode.json`
   - Lazy fallback to `opencode auth export` and legacy `~/.local/share/opencode/auth.json`
 - **Desktop GUI**:
-  - Clickable status strip with color-coded progress bars (green `< 80%`, amber `80–99%`, red `100%`)
-  - **Quick OpenCode Console access**: Direct button in the limits dialog and Settings page to open `https://opencode.ai/console`
-  - **Settings window** (`/limits-settings`, gear button in the limits dialog, and native `Settings → OpenCode Go limits`) with a live strip preview
+  - Clickable status strip with color-coded or monochrome progress bars and `⚡` fast-burn indicators
+  - **Quick OpenCode Console access**: Direct button in the limits dialog and Settings page to open your org's Console usage page
+  - **Settings window** (`/limits-settings`, gear button in the limits dialog, and native `Settings → OpenCode Go limits`) with a live strip preview and 1-click presets (`Standard`, `Only 5h`, `Text`, `Minimal`)
   - **Placement options**: Bottom bar (default), Top bar (`session.header`), Both, Titlebar / sidebar button, or Hidden
-  - **Custom strip layout**: Show/hide individual windows (`5h`, `1w`, `1m`), switch indicator style (`Bar + %`, `Text only`, `Bars only`), toggle window labels, and hover for the full breakdown
-  - 80% / 100% threshold toasts
+  - **Custom strip layout & behavior**: Show/hide individual windows (`5h`, `1w`, `1m`), switch indicator style (`Bar + %`, `Text only`, `Bars only`), toggle window labels, customize warning thresholds (`70%` / `80%` / `90%` / `100% only`) and refresh intervals (`30s` / `90s` / `5m`)
+  - Instant activity updates on model turns and window focus
   - Light & dark theme support
 - **TUI**:
-  - Live sidebar indicator (`sidebar.content`) with semantic theme colors
+  - Live sidebar indicator (`sidebar.content`) with semantic theme colors and `/limits-windows` selector
   - `/limits` slash command, command palette entry, and `Ctrl+Shift+L` shortcut
-  - Auto-refreshes on `session.usage.updated`, every 90 seconds, and on credential changes
+  - Auto-refreshes on `session.usage.updated`, periodically, and on credential changes
 - **Bilingual (English / Russian)**: Automatically follows the OpenCode UI language (Desktop `ctx.locale`, or `OPENCODE_LANG` / `LC_ALL` / `LANG` in TUI).
 - **Auto-Update**: Checks [GitHub Releases](https://github.com/cusvv/opencode-limits-go/releases) for new versions and automatically installs updates in the background (can be toggled or triggered manually in Settings).
 - **Security-first**: Tokens never leave the server process — never sent over RPC, never shown in the UI, and automatically redacted from logs (`%TEMP%/opencode-limits-go.log` or `/tmp/opencode-limits-go.log`).
@@ -108,6 +110,7 @@ Restart **OpenCode Desktop** (and run `/reload` in open TUI sessions). No `npm i
 |---|---|
 | Show limits dialog | `/limits` or `Ctrl+Shift+L` (or click the indicator in Desktop) |
 | Open plugin settings (Desktop) | `/limits-settings`, gear button in dialog, or `Settings → OpenCode Go limits` |
+| Filter TUI sidebar windows | `/limits-windows` |
 
 ### Verify via CLI
 

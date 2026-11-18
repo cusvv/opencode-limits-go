@@ -307,3 +307,63 @@ test("filterStripRows selects enabled windows and falls back if none are selecte
   const fallbackAll = filterStripRows(rows, { rolling: false, weekly: false, monthly: false })
   assert.equal(fallbackAll.length, 3)
 })
+
+test("history ring buffer computes recent deltas, detects late-window bursts, and calculates elapsed ratio", async () => {
+  const { attachHistoryDeltas, estimateWindowPace, recordUsageSnapshot, windowElapsedRatio } = await import("./model.ts")
+  const now = 1_700_000_000_000
+  const weekMs = 7 * 86_400_000
+
+  // 70% of week elapsed, overall avg = 50% (looks fine), but jumped +12% in last hour -> hot!
+  const row = {
+    key: "weekly" as const,
+    label: "1w",
+    used: 50,
+    status: "ok",
+    resetsAt: "Sun",
+    resetsAtMs: now + Math.round(weekMs * 0.3),
+    resetsIn: "2d",
+  }
+
+  let history = recordUsageSnapshot([], [{ ...row, used: 38 }], now - 3_600_000)
+  // Duplicate within 5 minutes is ignored
+  history = recordUsageSnapshot(history, [{ ...row, used: 38 }], now - 3_500_000)
+  assert.equal(history.length, 1)
+
+  history = recordUsageSnapshot(history, [row], now)
+  assert.equal(history.length, 2)
+
+  const [withDelta] = attachHistoryDeltas([row], history, now)
+  assert.equal(withDelta.delta1h, 12)
+
+  const pace = estimateWindowPace(row, now, "en", history)
+  assert.equal(pace?.kind, "hot")
+
+  const ratio = windowElapsedRatio(row, now)
+  assert.ok(ratio !== null && Math.abs(ratio - 0.7) < 0.01)
+})
+
+test("newAlerts supports custom warning thresholds and summarizeStatsByProvider splits Go vs Zen", async () => {
+  const { formatTokensCompact, formatUsd, newAlerts, summarizeStatsByProvider } = await import("./model.ts")
+
+  const notified = new Map<string, number>()
+  const rows = [{ key: "rolling" as const, label: "5h", used: 72, status: "ok", resetsAt: "", resetsIn: "" }]
+  assert.equal(newAlerts(rows, notified, 80).length, 0)
+  assert.equal(newAlerts(rows, notified, 70).length, 1)
+  assert.equal(newAlerts(rows, new Map(), 0).length, 0)
+
+  const summary = summarizeStatsByProvider([
+    { model: { providerID: "opencode-go" }, steps: 10, cost: 0, tokens: { input: 1000, output: 500, reasoning: 200 } },
+    { model: { providerID: "opencode" }, steps: 3, cost: 0.045, tokens: { input: 600, output: 200, reasoning: 0 } },
+    { model: { providerID: "google" }, steps: 1, cost: 0.02, tokens: { input: 100, output: 10, reasoning: 0 } },
+  ])
+  assert.equal(summary.goTokens, 1700)
+  assert.equal(summary.goSteps, 10)
+  assert.equal(summary.zenTokens, 800)
+  assert.equal(summary.zenSteps, 3)
+  assert.ok(Math.abs(summary.zenCostUsd - 0.045) < 1e-6)
+  assert.ok(Math.abs(summary.totalCostUsd - 0.065) < 1e-6)
+  assert.equal(formatTokensCompact(1700), "2k")
+  assert.equal(formatTokensCompact(1_500_000), "1.5M")
+  assert.equal(formatUsd(0.046), "$0.05")
+  assert.equal(formatUsd(0.004), "$0.0040")
+})

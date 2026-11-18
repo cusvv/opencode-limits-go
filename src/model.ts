@@ -1,6 +1,13 @@
 export type Locale = "en" | "ru"
 export type WindowKey = "rolling" | "weekly" | "monthly"
 
+export type UsageSnapshot = {
+  at: number
+  rolling?: number
+  weekly?: number
+  monthly?: number
+}
+
 export type LimitRow = {
   key?: WindowKey
   label: string
@@ -9,6 +16,7 @@ export type LimitRow = {
   resetsAt: string
   resetsAtMs?: number
   resetsIn: string
+  delta1h?: number
 }
 
 export type LimitCard = {
@@ -21,6 +29,7 @@ export type LimitCard = {
   rows: LimitRow[]
   tight: string
   error: string
+  snapshots?: UsageSnapshot[]
 }
 
 export type ErrorCode = "NO_TOKEN" | "INVALID_JSON" | "EMPTY_USAGE" | "INVALID_PERCENT" | "FETCH_FAILED"
@@ -233,14 +242,13 @@ export function alertMessage(row: LimitRow, now = Date.now(), lang: Locale = "en
   return `Limit ${label}: ${row.used}%${passed ? ` (${text})` : `, resets in ${text}`}`
 }
 
-const THRESHOLDS = [80, 100]
-
 // Track the highest threshold seen per window so notifications fire once per crossing and reset after drop.
-export function newAlerts(rows: LimitRow[], notified: Map<string, number>): LimitRow[] {
+export function newAlerts(rows: LimitRow[], notified: Map<string, number>, warnThreshold = 80): LimitRow[] {
+  const thresholds = warnThreshold > 0 && warnThreshold < 100 ? [warnThreshold, 100] : [100]
   const alerts: LimitRow[] = []
   for (const row of rows) {
     const id = row.key ?? row.label
-    const level = THRESHOLDS.filter((t) => row.used >= t).pop() ?? 0
+    const level = thresholds.filter((t) => row.used >= t).pop() ?? 0
     if (level > (notified.get(id) ?? 0)) alerts.push(row)
     notified.set(id, level)
   }
@@ -298,10 +306,11 @@ export function cardDetail(card: LimitCard, now = Date.now(), lang: Locale = "en
       : lang === "ru"
         ? `${row.resetsAt} (через ${text})`
         : `${row.resetsAt} (in ${text})`
-    return `${label.padStart(2)}: ${String(row.used).padStart(3)}%  ${bar(row.used)}  ${resetPart}${row.status !== "ok" ? `  [${row.status}]` : ""}`
+    const deltaPart = row.delta1h && row.delta1h > 0 ? `  +${row.delta1h}%` : ""
+    return `${label.padStart(2)}: ${String(row.used).padStart(3)}%  ${bar(row.used)}  ${resetPart}${deltaPart}${row.status !== "ok" ? `  [${row.status}]` : ""}`
   })
   const tightLineStr = tightLine(card.rows, now, lang)
-  const pace = paceSummary(card.rows, now, lang)
+  const pace = paceSummary(card.rows, now, lang, card.snapshots)
   const lines = [header, "", ...rows, "", tightLineStr]
   if (pace) lines.push(pace.text)
   return lines.join("\n")
@@ -317,6 +326,8 @@ export type WindowPace = {
   projectedPct: number
   timeToFullMs: number
   remainingMs: number
+  elapsedRatio: number
+  pctPerHour?: number
 }
 
 const WINDOW_DURATION_MS: Record<WindowKey, number> = {
@@ -325,8 +336,96 @@ const WINDOW_DURATION_MS: Record<WindowKey, number> = {
   monthly: 30 * 86_400_000,
 }
 
-// Estimate consumption pace while suppressing early-window noise (<1% elapsed or small bursts).
-export function estimateWindowPace(row: LimitRow, now = Date.now(), lang: Locale = "en"): WindowPace | null {
+export function windowElapsedRatio(row: Pick<LimitRow, "key" | "label" | "resetsAtMs">, now = Date.now()): number | null {
+  const key = rowWindowKey(row)
+  if (!key) return null
+  const resetsAtMs = row.resetsAtMs ?? 0
+  if (resetsAtMs <= 0) return null
+  const durationMs = WINDOW_DURATION_MS[key]
+  const remainingMs = resetsAtMs - now
+  if (remainingMs < 0) return 1
+  if (remainingMs > durationMs) return 0
+  return Math.min(1, Math.max(0, (durationMs - remainingMs) / durationMs))
+}
+
+const MAX_HISTORY = 72
+const MIN_HISTORY_INTERVAL_MS = 5 * 60_000
+
+export function recordUsageSnapshot(
+  history: readonly UsageSnapshot[],
+  rows: readonly LimitRow[],
+  now = Date.now(),
+): UsageSnapshot[] {
+  const entry: UsageSnapshot = { at: now }
+  for (const row of rows) {
+    const key = rowWindowKey(row)
+    if (key) entry[key] = row.used
+  }
+  const prev = history[history.length - 1]
+  if (
+    prev &&
+    now - prev.at < MIN_HISTORY_INTERVAL_MS &&
+    prev.rolling === entry.rolling &&
+    prev.weekly === entry.weekly &&
+    prev.monthly === entry.monthly
+  ) {
+    return [...history]
+  }
+  const next = [...history.filter((s) => typeof s?.at === "number" && s.at <= now && now - s.at <= 3 * 86_400_000), entry]
+  return next.slice(-MAX_HISTORY)
+}
+
+export function recentWindowDelta(
+  history: readonly UsageSnapshot[] | undefined,
+  key: WindowKey,
+  currentUsed: number,
+  now = Date.now(),
+  targetSpanMs = 3_600_000,
+): { delta: number; spanMs: number; pctPerHour: number } | null {
+  if (!history?.length) return null
+  const minAgeMs = 15 * 60_000
+  const maxAgeMs = 4 * 3_600_000
+  let best: { snap: UsageSnapshot; diffFromTarget: number; ageMs: number } | null = null
+  for (const snap of history) {
+    const val = snap[key]
+    if (typeof val !== "number") continue
+    const ageMs = now - snap.at
+    if (ageMs < minAgeMs || ageMs > maxAgeMs) continue
+    if (val > currentUsed) continue
+    const diffFromTarget = Math.abs(ageMs - targetSpanMs)
+    if (!best || diffFromTarget < best.diffFromTarget) {
+      best = { snap, diffFromTarget, ageMs }
+    }
+  }
+  if (!best) return null
+  const delta = currentUsed - (best.snap[key] ?? currentUsed)
+  if (delta <= 0) return null
+  const pctPerHour = (delta * 3_600_000) / best.ageMs
+  return { delta, spanMs: best.ageMs, pctPerHour }
+}
+
+export function attachHistoryDeltas(
+  rows: readonly LimitRow[],
+  history: readonly UsageSnapshot[] | undefined,
+  now = Date.now(),
+): LimitRow[] {
+  if (!history?.length) return [...rows]
+  return rows.map((row) => {
+    const key = rowWindowKey(row)
+    if (!key) return row
+    const recent = recentWindowDelta(history, key, row.used, now)
+    if (!recent || recent.delta < 1) return row
+    return { ...row, delta1h: Math.round(recent.delta) }
+  })
+}
+
+// Estimate consumption pace while suppressing early-window noise and incorporating recent snapshot bursts.
+export function estimateWindowPace(
+  row: LimitRow,
+  now = Date.now(),
+  lang: Locale = "en",
+  history?: readonly UsageSnapshot[],
+): WindowPace | null {
   const key = rowWindowKey(row)
   if (!key) return null
   const resetsAtMs = row.resetsAtMs ?? 0
@@ -335,6 +434,10 @@ export function estimateWindowPace(row: LimitRow, now = Date.now(), lang: Locale
   if (remainingMs <= 0) return null
 
   const label = windowLabel(row, lang)
+  const durationMs = WINDOW_DURATION_MS[key]
+  const elapsedMs = Math.max(0, durationMs - remainingMs)
+  const elapsedRatio = Math.min(1, Math.max(0, elapsedMs / durationMs))
+
   if (row.used >= 100) {
     return {
       kind: "exhausted",
@@ -344,24 +447,56 @@ export function estimateWindowPace(row: LimitRow, now = Date.now(), lang: Locale
       projectedPct: row.used,
       timeToFullMs: 0,
       remainingMs,
+      elapsedRatio,
     }
   }
 
-  const durationMs = WINDOW_DURATION_MS[key]
-  const elapsedMs = durationMs - remainingMs
-  const elapsedRatio = elapsedMs / durationMs
   if (elapsedRatio < 0.01) return null
 
-  const rate = row.used / 100 / elapsedRatio
-  const projectedPct = Math.round(rate * 100)
-  const timeToFullMs = row.used > 0 ? ((100 - row.used) * elapsedMs) / row.used : Number.POSITIVE_INFINITY
+  const avgRate = row.used / 100 / elapsedRatio
+  const avgTimeToFullMs = row.used > 0 ? ((100 - row.used) * elapsedMs) / row.used : Number.POSITIVE_INFINITY
 
-  if ((elapsedRatio >= 0.08 || row.used >= 35) && row.used >= 10 && rate >= 1.2 && projectedPct >= 110 && timeToFullMs < remainingMs) {
-    return { kind: "hot", key, label, rate, projectedPct, timeToFullMs, remainingMs }
+  const recent = recentWindowDelta(history, key, row.used, now)
+  const recentRate =
+    recent && recent.delta >= 3
+      ? (recent.pctPerHour * (durationMs / 3_600_000)) / 100
+      : 0
+  const recentTimeToFullMs =
+    recent && recent.pctPerHour > 0 ? ((100 - row.used) / recent.pctPerHour) * 3_600_000 : Number.POSITIVE_INFINITY
+
+  const useRecent = recentRate > avgRate * 1.15 && recentRate >= 1.25 && recentTimeToFullMs < remainingMs
+  const rate = useRecent ? recentRate : avgRate
+  const timeToFullMs = useRecent ? recentTimeToFullMs : avgTimeToFullMs
+  const projectedPct = Math.round(
+    useRecent ? row.used + (recent!.pctPerHour * remainingMs) / 3_600_000 : avgRate * 100,
+  )
+
+  if ((elapsedRatio >= 0.08 || row.used >= 35 || useRecent) && row.used >= 10 && rate >= 1.2 && projectedPct >= 110 && timeToFullMs < remainingMs) {
+    return {
+      kind: "hot",
+      key,
+      label,
+      rate,
+      projectedPct,
+      timeToFullMs,
+      remainingMs,
+      elapsedRatio,
+      pctPerHour: recent ? Math.round(recent.pctPerHour * 10) / 10 : undefined,
+    }
   }
 
   if (elapsedRatio >= 0.08 && row.used >= 10) {
-    return { kind: "steady", key, label, rate, projectedPct, timeToFullMs, remainingMs }
+    return {
+      kind: "steady",
+      key,
+      label,
+      rate,
+      projectedPct,
+      timeToFullMs,
+      remainingMs,
+      elapsedRatio,
+      pctPerHour: recent ? Math.round(recent.pctPerHour * 10) / 10 : undefined,
+    }
   }
 
   return null
@@ -371,9 +506,10 @@ export function paceSummary(
   rows: LimitRow[],
   now = Date.now(),
   lang: Locale = "en",
+  history?: readonly UsageSnapshot[],
 ): { kind: Exclude<PaceKind, "none">; text: string } | null {
   const paces = rows
-    .map((row) => estimateWindowPace(row, now, lang))
+    .map((row) => estimateWindowPace(row, now, lang, history))
     .filter((p): p is WindowPace => p !== null)
   if (!paces.length) return null
 
@@ -420,6 +556,71 @@ export function paceSummary(
         ? `Темп (${steady.label}): ровный (~${Math.min(steady.projectedPct, 100)}% к сбросу)`
         : `Pace (${steady.label}): steady (~${Math.min(steady.projectedPct, 100)}% by reset)`,
   }
+}
+
+export type ProviderActivitySummary = {
+  goTokens: number
+  goSteps: number
+  zenTokens: number
+  zenCostUsd: number
+  zenSteps: number
+  totalCostUsd: number
+}
+
+type ModelUsageLike = {
+  model?: { providerID?: unknown }
+  steps?: unknown
+  cost?: unknown
+  tokens?: {
+    input?: unknown
+    output?: unknown
+    reasoning?: unknown
+  }
+}
+
+function num(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0
+}
+
+export function summarizeStatsByProvider(models: readonly ModelUsageLike[] | undefined): ProviderActivitySummary {
+  const out: ProviderActivitySummary = {
+    goTokens: 0,
+    goSteps: 0,
+    zenTokens: 0,
+    zenCostUsd: 0,
+    zenSteps: 0,
+    totalCostUsd: 0,
+  }
+  if (!models?.length) return out
+  for (const item of models) {
+    const provider = typeof item.model?.providerID === "string" ? item.model.providerID : ""
+    const steps = num(item.steps)
+    const cost = num(item.cost)
+    const tokens = num(item.tokens?.input) + num(item.tokens?.output) + num(item.tokens?.reasoning)
+    out.totalCostUsd += cost
+    if (provider === "opencode-go") {
+      out.goSteps += steps
+      out.goTokens += tokens
+    } else if (provider === "opencode") {
+      out.zenSteps += steps
+      out.zenTokens += tokens
+      out.zenCostUsd += cost
+    }
+  }
+  return out
+}
+
+export function formatTokensCompact(count: number): string {
+  if (!Number.isFinite(count) || count <= 0) return "0"
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`
+  if (count >= 1_000) return `${Math.round(count / 1_000)}k`
+  return String(Math.round(count))
+}
+
+export function formatUsd(usd: number): string {
+  if (!Number.isFinite(usd) || usd <= 0) return "$0.00"
+  if (usd < 0.01) return `$${usd.toFixed(4)}`
+  return `$${usd.toFixed(2)}`
 }
 
 export function defaultPause(ms: number, signal?: AbortSignal): Promise<void> {

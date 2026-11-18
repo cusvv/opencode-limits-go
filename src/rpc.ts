@@ -10,8 +10,20 @@ const rowSchema = {
     resetsAt: { type: "string" },
     resetsAtMs: { type: "number" },
     resetsIn: { type: "string" },
+    delta1h: { type: "number" },
   },
   required: ["label", "used", "status", "resetsAt", "resetsIn"],
+} as const
+
+const snapshotSchema = {
+  type: "object",
+  properties: {
+    at: { type: "number" },
+    rolling: { type: "number" },
+    weekly: { type: "number" },
+    monthly: { type: "number" },
+  },
+  required: ["at"],
 } as const
 
 export const Limits = Rpc.define({
@@ -23,6 +35,7 @@ export const Limits = Rpc.define({
         properties: {
           force: { type: "boolean" },
           lang: { type: "string" },
+          maxAgeMs: { type: "number" },
         },
       } as const,
       output: {
@@ -37,6 +50,7 @@ export const Limits = Rpc.define({
           rows: { type: "array", items: rowSchema },
           tight: { type: "string" },
           error: { type: "string" },
+          snapshots: { type: "array", items: snapshotSchema },
         },
         required: ["ok", "org", "email", "checkedAt", "source", "rows", "tight", "error"],
       } as const,
@@ -57,6 +71,7 @@ export const Limits = Rpc.define({
           updateAvailable: { type: "boolean" },
           autoUpdated: { type: "boolean" },
           restartRequired: { type: "boolean" },
+          managedByPackageManager: { type: "boolean" },
           releaseUrl: { type: "string" },
           checkedAtMs: { type: "number" },
           error: { type: "string" },
