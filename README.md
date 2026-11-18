@@ -1,6 +1,7 @@
 # zen-limits
 
 [![Release](https://img.shields.io/github/v/release/cusvv/zen-limits?style=flat-square)](https://github.com/cusvv/zen-limits/releases/latest)
+[![npm](https://img.shields.io/npm/v/opencode-zen-limits?style=flat-square)](https://www.npmjs.com/package/opencode-zen-limits)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
 [![OpenCode](https://img.shields.io/badge/OpenCode-v2.3%2B-111827?style=flat-square)](https://opencode.ai)
 [![Language](https://img.shields.io/badge/Lang-EN%20%7C%20RU-16a34a?style=flat-square)](#features)
@@ -46,6 +47,8 @@ Requires **OpenCode v2.3.0+** and an active OpenCode Go credential (via `opencod
 ### Option 1: Quick Install via OpenCode CLI (recommended)
 
 ```sh
+opencode plugin add opencode-zen-limits
+# or directly from GitHub:
 opencode plugin add github:cusvv/zen-limits
 ```
 
