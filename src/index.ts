@@ -81,7 +81,7 @@ function formatCached(entry: CachedRaw, lang: Locale): LimitCard {
 }
 
 export default Plugin.define({
-  id: "zen-limits",
+  id: "opencode-limits-go",
   async setup(ctx) {
     const creds = createCredentials({
       integration: ctx.integration,

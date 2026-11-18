@@ -1,7 +1,7 @@
-# zen-limits
+# opencode-limits-go
 
-[![Release](https://img.shields.io/github/v/release/cusvv/zen-limits?style=flat-square)](https://github.com/cusvv/zen-limits/releases/latest)
-[![npm](https://img.shields.io/npm/v/opencode-zen-limits?style=flat-square)](https://www.npmjs.com/package/opencode-zen-limits)
+[![Release](https://img.shields.io/github/v/release/cusvv/opencode-limits-go?style=flat-square)](https://github.com/cusvv/opencode-limits-go/releases/latest)
+[![npm](https://img.shields.io/npm/v/opencode-limits-go?style=flat-square)](https://www.npmjs.com/package/opencode-limits-go)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
 [![OpenCode](https://img.shields.io/badge/OpenCode-v2.3%2B-111827?style=flat-square)](https://opencode.ai)
 [![Language](https://img.shields.io/badge/Lang-EN%20%7C%20RU-16a34a?style=flat-square)](#features)
@@ -35,8 +35,8 @@ Displays live usage across all three OpenCode Go windows — **5-hour rolling**,
   - `/limits` slash command, command palette entry, and `Ctrl+Shift+L` shortcut
   - Auto-refreshes on `session.usage.updated`, every 90 seconds, and on credential changes
 - **Bilingual (English / Russian)**: Automatically follows the OpenCode UI language (Desktop `ctx.locale`, or `OPENCODE_LANG` / `LC_ALL` / `LANG` in TUI).
-- **Auto-Update**: Checks [GitHub Releases](https://github.com/cusvv/zen-limits/releases) for new versions and automatically installs updates in the background (can be toggled or triggered manually in Settings).
-- **Security-first**: Tokens never leave the server process — never sent over RPC, never shown in the UI, and automatically redacted from logs (`%TEMP%/zen-limits.log` or `/tmp/zen-limits.log`).
+- **Auto-Update**: Checks [GitHub Releases](https://github.com/cusvv/opencode-limits-go/releases) for new versions and automatically installs updates in the background (can be toggled or triggered manually in Settings).
+- **Security-first**: Tokens never leave the server process — never sent over RPC, never shown in the UI, and automatically redacted from logs (`%TEMP%/opencode-limits-go.log` or `/tmp/opencode-limits-go.log`).
 
 ---
 
@@ -47,9 +47,9 @@ Requires **OpenCode v2.3.0+** and an active OpenCode Go credential (via `opencod
 ### Option 1: Quick Install via OpenCode CLI (recommended)
 
 ```sh
-opencode plugin add opencode-zen-limits
+opencode plugin add opencode-limits-go
 # or directly from GitHub:
-opencode plugin add github:cusvv/zen-limits
+opencode plugin add github:cusvv/opencode-limits-go
 ```
 
 Then restart **OpenCode Desktop** (or run `/reload` in open TUI sessions).
@@ -58,30 +58,30 @@ Then restart **OpenCode Desktop** (or run `/reload` in open TUI sessions).
 
 ```sh
 # macOS / Linux
-git clone https://github.com/cusvv/zen-limits.git ~/.config/opencode/local-plugins/zen-limits
+git clone https://github.com/cusvv/opencode-limits-go.git ~/.config/opencode/local-plugins/opencode-limits-go
 ```
 
 ```powershell
 # Windows (PowerShell)
-git clone https://github.com/cusvv/zen-limits.git "$env:USERPROFILE\.config\opencode\local-plugins\zen-limits"
+git clone https://github.com/cusvv/opencode-limits-go.git "$env:USERPROFILE\.config\opencode\local-plugins\opencode-limits-go"
 ```
 
 ### Option 3: Download Release Archive
 
-Download `zen-limits.zip` or `zen-limits.tar.gz` from the [Releases](https://github.com/cusvv/zen-limits/releases) page and extract it so the folder is:
+Download `opencode-limits-go.zip` or `opencode-limits-go.tar.gz` from the [Releases](https://github.com/cusvv/opencode-limits-go/releases) page and extract it so the folder is:
 
-- Windows: `%USERPROFILE%\.config\opencode\local-plugins\zen-limits`
-- macOS / Linux: `~/.config/opencode/local-plugins/zen-limits`
+- Windows: `%USERPROFILE%\.config\opencode\local-plugins\opencode-limits-go`
+- macOS / Linux: `~/.config/opencode/local-plugins/opencode-limits-go`
 
 ### Enable in `opencode.json` (Options 2 & 3)
 
-For manual installs, add `./local-plugins/zen-limits` to `plugins` in your global `~/.config/opencode/opencode.json`:
+For manual installs, add `./local-plugins/opencode-limits-go` to `plugins` in your global `~/.config/opencode/opencode.json`:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "./local-plugins/zen-limits"
+    "./local-plugins/opencode-limits-go"
   ]
 }
 ```
@@ -91,7 +91,7 @@ For manual installs, add `./local-plugins/zen-limits` to `plugins` in your globa
 > {
 >   "plugins": [
 >     {
->       "package": "./local-plugins/zen-limits",
+>       "package": "./local-plugins/opencode-limits-go",
 >       "options": { "token": "{env:OPENCODE_GO_API_KEY}" }
 >     }
 >   ]
@@ -113,7 +113,7 @@ Restart **OpenCode Desktop** (and run `/reload` in open TUI sessions). No `npm i
 
 ```sh
 opencode plugin list
-opencode api post /api/rpc/zen-limits/status --data '{"input":{"force":true}}'
+opencode api post /api/rpc/opencode-limits-go/status --data '{"input":{"force":true}}'
 ```
 
 ---

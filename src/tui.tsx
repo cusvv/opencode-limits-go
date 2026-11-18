@@ -21,19 +21,19 @@ const COPY = {
     loading: "limits: …",
     noServer: "cannot reach plugin server",
     failed: "Failed to load limits",
-    updated: (v: string) => `zen-limits updated to v${v}. Run /reload to apply.`,
+    updated: (v: string) => `opencode-limits-go updated to v${v}. Run /reload to apply.`,
   },
   ru: {
     title: "Лимиты OpenCode Go",
     loading: "лимиты: …",
     noServer: "нет связи с сервером плагина",
     failed: "Не удалось получить лимиты",
-    updated: (v: string) => `zen-limits обновлён до v${v}. Выполните /reload.`,
+    updated: (v: string) => `opencode-limits-go обновлён до v${v}. Выполните /reload.`,
   },
 } as const
 
 export default Plugin.define({
-  id: "zen-limits.tui",
+  id: "opencode-limits-go.tui",
   setup(ctx) {
     const lang: Locale = normalizeLocale(
       typeof ctx.options.lang === "string"
@@ -132,7 +132,7 @@ export default Plugin.define({
       mode: "global",
       commands: [
         {
-          id: "zen-limits.show",
+          id: "opencode-limits-go.show",
           title: copy.title,
           bind: "ctrl+shift+l",
           palette: true,

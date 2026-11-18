@@ -15,7 +15,7 @@ const rowSchema = {
 } as const
 
 export const Limits = Rpc.define({
-  id: "zen-limits",
+  id: "opencode-limits-go",
   methods: {
     status: {
       input: {

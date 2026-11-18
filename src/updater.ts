@@ -9,7 +9,7 @@ import { log } from "./log.ts"
 
 const exec = promisify(execFile)
 
-export const REPO = "cusvv/zen-limits"
+export const REPO = "cusvv/opencode-limits-go"
 const RELEASES_API = `https://api.github.com/repos/${REPO}/releases/latest`
 const CHECK_TTL_MS = 6 * 60 * 60 * 1000
 const MAX_ARCHIVE_BYTES = 10 * 1024 * 1024
@@ -150,21 +150,21 @@ async function readPackageVersion(dir: string): Promise<{ name: string; version:
 }
 
 export async function findVerifiedPluginRoot(extractDir: string): Promise<string> {
-  const candidates = [extractDir, path.join(extractDir, "zen-limits")]
+  const candidates = [extractDir, path.join(extractDir, "opencode-limits-go"), path.join(extractDir, "zen-limits")]
   for (const entry of await readdir(extractDir, { withFileTypes: true })) {
     if (entry.isDirectory()) candidates.push(path.join(extractDir, entry.name))
   }
 
   for (const dir of candidates) {
     const pkg = await readPackageVersion(dir)
-    if (!pkg || pkg.name !== "opencode-zen-limits") continue
+    if (!pkg || pkg.name !== "opencode-limits-go") continue
     const hasIndex = await exists(path.join(dir, "src", "index.ts"))
     const hasTui = await exists(path.join(dir, "src", "tui.tsx"))
     const hasGui = await exists(path.join(dir, "dist", "gui-experimental.cjs"))
     if (hasIndex && hasTui && hasGui) return dir
   }
 
-  throw new Error("Downloaded archive does not contain a valid zen-limits build")
+  throw new Error("Downloaded archive does not contain a valid opencode-limits-go build")
 }
 
 export async function copyVerifiedPlugin(srcRoot: string, destRoot: string): Promise<void> {
@@ -220,7 +220,7 @@ export function createUpdater(deps: UpdaterDeps = {}) {
     const res = await fetchFn(RELEASES_API, {
       headers: {
         Accept: "application/vnd.github+json",
-        "User-Agent": `opencode-zen-limits/${version}`,
+        "User-Agent": `opencode-limits-go/${version}`,
       },
       signal: AbortSignal.timeout(10_000),
     })
@@ -243,7 +243,7 @@ export function createUpdater(deps: UpdaterDeps = {}) {
         }
       }
 
-      const tmpBase = await mkdtemp(path.join(os.tmpdir(), "zen-limits-update-"))
+      const tmpBase = await mkdtemp(path.join(os.tmpdir(), "opencode-limits-go-update-"))
       try {
         const archivePath = path.join(tmpBase, download.kind === "zip" ? "release.zip" : "release.tar.gz")
         const extractDir = path.join(tmpBase, "extracted")
@@ -252,7 +252,7 @@ export function createUpdater(deps: UpdaterDeps = {}) {
         const res = await fetchFn(download.url, {
           headers: {
             Accept: "application/octet-stream",
-            "User-Agent": `opencode-zen-limits/${await currentVersion()}`,
+            "User-Agent": `opencode-limits-go/${await currentVersion()}`,
           },
           signal: AbortSignal.timeout(30_000),
         })

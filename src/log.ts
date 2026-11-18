@@ -2,7 +2,7 @@ import os from "node:os"
 import path from "node:path"
 import { appendFileSync, renameSync, statSync } from "node:fs"
 
-const FILE = path.join(os.tmpdir(), "zen-limits.log")
+const FILE = path.join(os.tmpdir(), "opencode-limits-go.log")
 const MAX = 256 * 1024
 
 export function log(message: string, data: Record<string, unknown> = {}): void {

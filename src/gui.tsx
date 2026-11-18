@@ -214,7 +214,7 @@ export default Plugin.define({
       "settings.version.error": "v{{version}} · Check failed: {{error}}",
       "settings.update.check": "Check now",
       "settings.update.install": "Update now",
-      "settings.update.installedToast": "zen-limits updated to v{{version}}. Restart OpenCode Desktop to apply.",
+      "settings.update.installedToast": "opencode-limits-go updated to v{{version}}. Restart OpenCode Desktop to apply.",
       "settings.update.failedToast": "Update failed: {{error}}",
       "settings.done": "Done",
       "settings.openAll": "Open in Settings",
@@ -267,7 +267,7 @@ export default Plugin.define({
       "settings.version.error": "v{{version}} · Ошибка проверки: {{error}}",
       "settings.update.check": "Проверить",
       "settings.update.install": "Обновить",
-      "settings.update.installedToast": "zen-limits обновлён до v{{version}}. Перезапустите OpenCode Desktop.",
+      "settings.update.installedToast": "opencode-limits-go обновлён до v{{version}}. Перезапустите OpenCode Desktop.",
       "settings.update.failedToast": "Не удалось обновить: {{error}}",
       "settings.done": "Готово",
       "settings.openAll": "В общих настройках",
@@ -555,7 +555,7 @@ export default Plugin.define({
             }
           >
             <ui.SettingsRow
-              id="zen-limits-preview"
+              id="opencode-limits-go-preview"
               title={ctx.t("settings.preview.label")}
               description={ctx.t(`settings.placement.${prefs.value.placement}`)}
             >
@@ -564,7 +564,7 @@ export default Plugin.define({
           </Show>
           <SettingField
             page={props.page}
-            id="zen-limits-placement"
+            id="opencode-limits-go-placement"
             title={ctx.t("settings.placement.title")}
             description={ctx.t("settings.placement.description")}
           >
@@ -577,7 +577,7 @@ export default Plugin.define({
           </SettingField>
           <SettingField
             page={props.page}
-            id="zen-limits-windows"
+            id="opencode-limits-go-windows"
             title={ctx.t("settings.windows.title")}
             description={ctx.t("settings.windows.description")}
           >
@@ -602,7 +602,7 @@ export default Plugin.define({
           </SettingField>
           <SettingField
             page={props.page}
-            id="zen-limits-style"
+            id="opencode-limits-go-style"
             title={ctx.t("settings.style.title")}
             description={ctx.t("settings.style.description")}
           >
@@ -615,7 +615,7 @@ export default Plugin.define({
           </SettingField>
           <SettingField
             page={props.page}
-            id="zen-limits-labels"
+            id="opencode-limits-go-labels"
             title={ctx.t("settings.labels.title")}
             description={ctx.t("settings.labels.description")}
           >
@@ -634,7 +634,7 @@ export default Plugin.define({
       return (
         <SettingField
           page={props.page}
-          id="zen-limits-alerts"
+          id="opencode-limits-go-alerts"
           title={ctx.t("settings.alerts.title")}
           description={ctx.t("settings.alerts.description")}
         >
@@ -665,7 +665,7 @@ export default Plugin.define({
         <>
           <SettingField
             page={props.page}
-            id="zen-limits-autoupdate"
+            id="opencode-limits-go-autoupdate"
             title={ctx.t("settings.autoUpdate.title")}
             description={ctx.t("settings.autoUpdate.description")}
           >
@@ -681,7 +681,7 @@ export default Plugin.define({
           </SettingField>
           <SettingField
             page={props.page}
-            id="zen-limits-version"
+            id="opencode-limits-go-version"
             title={ctx.t("settings.version.title")}
             description={updateDescription()}
           >
@@ -906,43 +906,43 @@ export default Plugin.define({
           keywords: "zen limits opencode go quota usage",
         },
         {
-          id: "zen-limits-placement",
+          id: "opencode-limits-go-placement",
           title: ctx.t("settings.placement.title"),
           description: ctx.t("settings.placement.description"),
           keywords: "position bottom top header titlebar sidebar",
         },
         {
-          id: "zen-limits-windows",
+          id: "opencode-limits-go-windows",
           title: ctx.t("settings.windows.title"),
           description: ctx.t("settings.windows.description"),
           keywords: "windows 5h 1w 1m filter show hide rolling weekly monthly",
         },
         {
-          id: "zen-limits-style",
+          id: "opencode-limits-go-style",
           title: ctx.t("settings.style.title"),
           description: ctx.t("settings.style.description"),
           keywords: "bars text percent compact progress style",
         },
         {
-          id: "zen-limits-labels",
+          id: "opencode-limits-go-labels",
           title: ctx.t("settings.labels.title"),
           description: ctx.t("settings.labels.description"),
           keywords: "labels prefix 5h 1w 1m minimal",
         },
         {
-          id: "zen-limits-alerts",
+          id: "opencode-limits-go-alerts",
           title: ctx.t("settings.alerts.title"),
           description: ctx.t("settings.alerts.description"),
           keywords: "toast alert 80 100 notification",
         },
         {
-          id: "zen-limits-autoupdate",
+          id: "opencode-limits-go-autoupdate",
           title: ctx.t("settings.autoUpdate.title"),
           description: ctx.t("settings.autoUpdate.description"),
           keywords: "update github release autoupdate",
         },
         {
-          id: "zen-limits-version",
+          id: "opencode-limits-go-version",
           title: ctx.t("settings.version.title"),
           keywords: "version check update",
         },
