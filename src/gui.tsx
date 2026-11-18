@@ -8,14 +8,19 @@ import {
   type Locale,
   alertMessage,
   emptyCard,
+  estimateWindowPace,
   newAlerts,
   normalizeLocale,
+  paceSummary,
   resetText,
   retry,
   sourceLabel,
+  span,
   tightLine,
   windowLabel,
 } from "./model.ts"
+
+const CONSOLE_URL = "https://opencode.ai/console"
 
 type UpdateStatusInfo = {
   currentVersion: string
@@ -121,6 +126,9 @@ export default Plugin.define({
       "limits.ok": "OK",
       "limits.refresh": "Refresh",
       "limits.settings": "Settings",
+      "limits.console": "Console",
+      "limits.consoleHint": "Open OpenCode Console in browser",
+      "limits.paceHint": "Estimated time left at current pace",
       "limits.reset": "reset",
       "limits.in": "in",
       "limits.noServer": "cannot reach plugin server",
@@ -162,6 +170,9 @@ export default Plugin.define({
       "limits.ok": "ОК",
       "limits.refresh": "Обновить",
       "limits.settings": "Настройки",
+      "limits.console": "Консоль",
+      "limits.consoleHint": "Открыть OpenCode Console в браузере",
+      "limits.paceHint": "Оценка запаса по текущему темпу",
       "limits.reset": "сброс",
       "limits.in": "через",
       "limits.noServer": "нет связи с сервером плагина",
@@ -561,6 +572,14 @@ export default Plugin.define({
           }
         }
 
+        const pace = () => paceSummary(current().rows, now(), lang())
+        const paceColor = () => {
+          const k = pace()?.kind
+          if (k === "exhausted") return "#ef4444"
+          if (k === "hot") return "#f59e0b"
+          return undefined
+        }
+
         return (
           <ui.Dialog
             title={ctx.t("command.limits")}
@@ -568,17 +587,27 @@ export default Plugin.define({
             size="fit"
             footer={
               <div style="display:flex;align-items:center;justify-content:space-between;width:100%;gap:8px;">
-                <ui.Tooltip value={ctx.t("limits.settings")}>
-                  <ui.IconButton
-                    icon="settings-gear"
-                    label={ctx.t("limits.settings")}
-                    variant="neutral"
-                    onClick={() => {
-                      dialog.close()
-                      openSettingsDialog()
-                    }}
-                  />
-                </ui.Tooltip>
+                <div style="display:flex;align-items:center;gap:6px;">
+                  <ui.Tooltip value={ctx.t("limits.settings")}>
+                    <ui.IconButton
+                      icon="settings-gear"
+                      label={ctx.t("limits.settings")}
+                      variant="neutral"
+                      onClick={() => {
+                        dialog.close()
+                        openSettingsDialog()
+                      }}
+                    />
+                  </ui.Tooltip>
+                  <ui.Tooltip value={ctx.t("limits.consoleHint")}>
+                    <ui.IconButton
+                      icon="square-arrow-top-right"
+                      label={ctx.t("limits.console")}
+                      variant="neutral"
+                      onClick={() => ctx.system.openExternal(CONSOLE_URL)}
+                    />
+                  </ui.Tooltip>
+                </div>
                 <div style="display:flex;align-items:center;gap:8px;">
                   <ui.Button variant="neutral" icon="refresh" busy={refreshing()} onClick={() => void handleRefresh()}>
                     {ctx.t("limits.refresh")}
@@ -599,6 +628,7 @@ export default Plugin.define({
                       ? `${ctx.t("limits.reset")} ${row.resetsAt} · ${r.text}`
                       : `${ctx.t("limits.reset")} ${row.resetsAt} · ${ctx.t("limits.in")} ${r.text}`
                   }
+                  const rowPace = () => estimateWindowPace(row, now(), lang())
                   return (
                     <div style="display:flex;align-items:center;gap:10px;font-size:12px;">
                       <span style="width:24px;opacity:.7;">{windowLabel(row, lang())}</span>
@@ -608,11 +638,23 @@ export default Plugin.define({
                         {resetLine()}
                         {row.status !== "ok" ? ` · ${row.status}` : ""}
                       </span>
+                      <Show when={rowPace()?.kind === "hot"}>
+                        <ui.Tooltip value={ctx.t("limits.paceHint")}>
+                          <span style="margin-left:auto;font-size:11px;color:#f59e0b;font-variant-numeric:tabular-nums;">
+                            ⚡ ~{span(rowPace()!.timeToFullMs, lang())}
+                          </span>
+                        </ui.Tooltip>
+                      </Show>
                     </div>
                   )
                 }}
               </For>
               <div style="font-size:11px;opacity:.7;">{tightLine(current().rows, now(), lang())}</div>
+              <Show when={pace()}>
+                <div style={`font-size:11px;opacity:.85;${paceColor() ? `color:${paceColor()};` : ""}`}>
+                  {pace()!.text}
+                </div>
+              </Show>
             </div>
           </ui.Dialog>
         )
@@ -696,9 +738,14 @@ export default Plugin.define({
           title={ctx.t("settings.title")}
           description={ctx.t("settings.description")}
           actions={
-            <ui.Button variant="neutral" icon="refresh" busy={refreshing()} onClick={() => void refresh(true)}>
-              {ctx.t("limits.refresh")}
-            </ui.Button>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <ui.Button variant="ghost" icon="square-arrow-top-right" onClick={() => ctx.system.openExternal(CONSOLE_URL)}>
+                {ctx.t("limits.console")}
+              </ui.Button>
+              <ui.Button variant="neutral" icon="refresh" busy={refreshing()} onClick={() => void refresh(true)}>
+                {ctx.t("limits.refresh")}
+              </ui.Button>
+            </div>
           }
         >
           <ui.SettingsSection title={ctx.t("settings.section.display")}>

@@ -185,3 +185,108 @@ test("retry stops on the first success, does not pause after final attempt, and 
   assert.equal(aborted, null)
   assert.equal(calls, 1)
 })
+
+test("estimateWindowPace suppresses tiny/early-window noise and flags heavy bursts", async () => {
+  const { estimateWindowPace, paceSummary } = await import("./model.ts")
+  const now = 1_700_000_000_000
+  const weekMs = 7 * 24 * 60 * 60 * 1000
+
+  // Very early in window (3% elapsed) with modest usage (15%) -> suppressed (null)
+  const earlyNoise = {
+    key: "weekly" as const,
+    label: "Weekly",
+    used: 15,
+    resetsIn: "6d 19h",
+    resetsAt: "Sun",
+    resetsAtMs: now + Math.round(weekMs * 0.97),
+    status: "ok",
+  }
+  assert.equal(estimateWindowPace(earlyNoise, now, "en"), null)
+
+  // Low usage (<10%) later in window -> suppressed (null)
+  const tinyUsage = {
+    key: "weekly" as const,
+    label: "Weekly",
+    used: 5,
+    resetsIn: "3d",
+    resetsAt: "Thu",
+    resetsAtMs: now + Math.round(weekMs * 0.45),
+    status: "ok",
+  }
+  assert.equal(estimateWindowPace(tinyUsage, now, "en"), null)
+
+  // Heavy burst early in window (>=35% used at 5% elapsed) -> flagged as hot
+  const burst = {
+    key: "weekly" as const,
+    label: "Weekly",
+    used: 40,
+    resetsIn: "6d 15h",
+    resetsAt: "Sun",
+    resetsAtMs: now + Math.round(weekMs * 0.95),
+    status: "ok",
+  }
+  const burstPace = estimateWindowPace(burst, now, "en")
+  assert.equal(burstPace?.kind, "hot")
+  assert.ok(paceSummary([burst], now, "en")?.text.includes("Pace"))
+
+  // Steady comfortable pace (26% used at 34% elapsed -> projected ~76%)
+  const steady = {
+    key: "weekly" as const,
+    label: "Weekly",
+    used: 26,
+    resetsIn: "4d 14h",
+    resetsAt: "Fri",
+    resetsAtMs: now + Math.round(weekMs * 0.66),
+    status: "ok",
+  }
+  const steadyPace = estimateWindowPace(steady, now, "en")
+  assert.equal(steadyPace?.kind, "steady")
+  assert.ok(paceSummary([steady], now, "en")?.text.includes("comfortable"))
+
+  // Exhausted window (100%)
+  const exhausted = {
+    key: "rolling" as const,
+    label: "5h",
+    used: 100,
+    resetsIn: "2h",
+    resetsAt: "14:00",
+    resetsAtMs: now + 2 * 3600_000,
+    status: "limited",
+  }
+  const summary = paceSummary([exhausted, steady], now, "ru")
+  assert.equal(summary?.kind, "exhausted")
+  assert.ok(summary?.text.includes("исчерпан"))
+})
+
+test("cardDetail appends smart pace line when significant", async () => {
+  const { cardDetail } = await import("./model.ts")
+  const now = 1_700_000_000_000
+  const weekMs = 7 * 24 * 60 * 60 * 1000
+
+  const card = {
+    ok: true as const,
+    org: "OpenCode",
+    email: "user@example.com",
+    source: "key" as const,
+    checkedAt: "12:00",
+    checkedAtMs: now,
+    tight: "",
+    error: "",
+    rows: [
+      {
+        key: "weekly" as const,
+        label: "Weekly",
+        used: 70,
+        resetsIn: "4d 12h",
+        resetsAt: "Fri",
+        resetsAtMs: now + Math.round(weekMs * 0.64),
+        status: "ok",
+      },
+    ],
+  }
+
+  const detailEn = cardDetail(card, now, "en")
+  const detailRu = cardDetail(card, now, "ru")
+  assert.ok(detailEn.includes("Pace (1w):"))
+  assert.ok(detailRu.includes("Темп (1н):"))
+})

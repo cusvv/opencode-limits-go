@@ -285,7 +285,126 @@ export function cardDetail(card: LimitCard, now = Date.now(), lang: Locale = "en
         : `${row.resetsAt} (in ${text})`
     return `${label.padStart(2)}: ${String(row.used).padStart(3)}%  ${bar(row.used)}  ${resetPart}${row.status !== "ok" ? `  [${row.status}]` : ""}`
   })
-  return [header, "", ...rows, "", tightLine(card.rows, now, lang)].join("\n")
+  const tightLineStr = tightLine(card.rows, now, lang)
+  const pace = paceSummary(card.rows, now, lang)
+  const lines = [header, "", ...rows, "", tightLineStr]
+  if (pace) lines.push(pace.text)
+  return lines.join("\n")
+}
+
+export type PaceKind = "none" | "steady" | "hot" | "exhausted"
+
+export type WindowPace = {
+  kind: PaceKind
+  key: WindowKey
+  label: string
+  rate: number
+  projectedPct: number
+  timeToFullMs: number
+  remainingMs: number
+}
+
+const WINDOW_DURATION_MS: Record<WindowKey, number> = {
+  rolling: 5 * 3_600_000,
+  weekly: 7 * 86_400_000,
+  monthly: 30 * 86_400_000,
+}
+
+// Estimate consumption pace while suppressing early-window noise (<1% elapsed or small bursts).
+export function estimateWindowPace(row: LimitRow, now = Date.now(), lang: Locale = "en"): WindowPace | null {
+  const key = row.key ?? WINDOW_BY_LABEL.get(row.label)?.key
+  if (!key) return null
+  const resetsAtMs = row.resetsAtMs ?? 0
+  if (resetsAtMs <= 0) return null
+  const remainingMs = resetsAtMs - now
+  if (remainingMs <= 0) return null
+
+  const label = windowLabel(row, lang)
+  if (row.used >= 100) {
+    return {
+      kind: "exhausted",
+      key,
+      label,
+      rate: 0,
+      projectedPct: row.used,
+      timeToFullMs: 0,
+      remainingMs,
+    }
+  }
+
+  const durationMs = WINDOW_DURATION_MS[key]
+  const elapsedMs = durationMs - remainingMs
+  const elapsedRatio = elapsedMs / durationMs
+  if (elapsedRatio < 0.01) return null
+
+  const rate = row.used / 100 / elapsedRatio
+  const projectedPct = Math.round(rate * 100)
+  const timeToFullMs = row.used > 0 ? ((100 - row.used) * elapsedMs) / row.used : Number.POSITIVE_INFINITY
+
+  if ((elapsedRatio >= 0.08 || row.used >= 35) && row.used >= 10 && rate >= 1.2 && projectedPct >= 110 && timeToFullMs < remainingMs) {
+    return { kind: "hot", key, label, rate, projectedPct, timeToFullMs, remainingMs }
+  }
+
+  if (elapsedRatio >= 0.08 && row.used >= 10) {
+    return { kind: "steady", key, label, rate, projectedPct, timeToFullMs, remainingMs }
+  }
+
+  return null
+}
+
+export function paceSummary(
+  rows: LimitRow[],
+  now = Date.now(),
+  lang: Locale = "en",
+): { kind: Exclude<PaceKind, "none">; text: string } | null {
+  const paces = rows
+    .map((row) => estimateWindowPace(row, now, lang))
+    .filter((p): p is WindowPace => p !== null)
+  if (!paces.length) return null
+
+  const exhausted = paces.find((p) => p.kind === "exhausted")
+  if (exhausted) {
+    return {
+      kind: "exhausted",
+      text:
+        lang === "ru"
+          ? `Лимит ${exhausted.label} исчерпан — сброс через ${span(exhausted.remainingMs, lang)}`
+          : `${exhausted.label} limit reached — resets in ${span(exhausted.remainingMs, lang)}`,
+    }
+  }
+
+  const hot = paces
+    .filter((p) => p.kind === "hot")
+    .sort((a, b) => a.timeToFullMs - b.timeToFullMs)[0]
+  if (hot) {
+    const marginMs = Math.max(60_000, hot.remainingMs - hot.timeToFullMs)
+    return {
+      kind: "hot",
+      text:
+        lang === "ru"
+          ? `Темп (${hot.label}): хватит на ~${span(hot.timeToFullMs, lang)} (за ${span(marginMs, lang)} до сброса)`
+          : `Pace (${hot.label}): ~${span(hot.timeToFullMs, lang)} until 100% (${span(marginMs, lang)} before reset)`,
+    }
+  }
+
+  const steady = [...paces].sort((a, b) => b.projectedPct - a.projectedPct)[0]
+  if (steady.rate <= 0.85) {
+    return {
+      kind: "steady",
+      text:
+        lang === "ru"
+          ? `Темп (${steady.label}): спокойный (~${steady.projectedPct}% к сбросу)`
+          : `Pace (${steady.label}): comfortable (~${steady.projectedPct}% by reset)`,
+    }
+  }
+
+  return {
+    kind: "steady",
+    text:
+      lang === "ru"
+        ? `Темп (${steady.label}): ровный (~${Math.min(steady.projectedPct, 100)}% к сбросу)`
+        : `Pace (${steady.label}): steady (~${Math.min(steady.projectedPct, 100)}% by reset)`,
+  }
 }
 
 export function defaultPause(ms: number, signal?: AbortSignal): Promise<void> {

@@ -9,6 +9,7 @@ Displays live usage across all three OpenCode Go windows — **5-hour rolling**,
 ## Features
 
 - **All OpenCode Go windows**: `5h` / `1w` / `1m` percentages, reset timestamps, countdowns, and tightest-window summary.
+- **Smart pace estimation**: Noise-filtered burn-rate projection for `5h`, `1w`, and `1m` windows — suppresses tiny early-window fluctuations, flags fast bursts, and estimates time to exhaustion vs. reset.
 - **Works with any OpenCode auth setup**:
   - OpenCode Console **OAuth** account (`opencode`)
   - Saved **API key** (`opencode-go` or `opencode` integration)
@@ -17,6 +18,7 @@ Displays live usage across all three OpenCode Go windows — **5-hour rolling**,
   - Lazy fallback to `opencode auth export` and legacy `~/.local/share/opencode/auth.json`
 - **Desktop GUI**:
   - Clickable status strip with color-coded progress bars (green `< 80%`, amber `80–99%`, red `100%`)
+  - **Quick OpenCode Console access**: Direct button in the limits dialog and Settings page to open `https://opencode.ai/console`
   - **Settings window** (`/limits-settings`, gear button in the limits dialog, and native `Settings → OpenCode Go limits`)
   - **Placement options**: Bottom bar (default), Top bar (`session.header`), Both, Titlebar / sidebar button, or Hidden
   - Toggleable mini progress bars and 80% / 100% threshold toasts
