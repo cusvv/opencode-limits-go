@@ -1,0 +1,777 @@
+import { createEffect, createSignal, For, type JSX, on, onCleanup, Show } from "solid-js"
+import { Schema } from "effect"
+import { Command, Plugin, SettingsPage, Slot, Store, TitlebarItem } from "@opencode/plugin/gui"
+import { Limits } from "./rpc.ts"
+import {
+  type LimitCard,
+  type LimitRow,
+  type Locale,
+  alertMessage,
+  emptyCard,
+  newAlerts,
+  normalizeLocale,
+  resetText,
+  retry,
+  sourceLabel,
+  tightLine,
+  windowLabel,
+} from "./model.ts"
+
+type UpdateStatusInfo = {
+  currentVersion: string
+  latestVersion: string
+  updateAvailable: boolean
+  autoUpdated: boolean
+  restartRequired: boolean
+  releaseUrl: string
+  checkedAtMs: number
+  error: string
+}
+
+const PLACEMENTS = ["bottom", "top", "both", "titlebar", "hidden"] as const
+type Placement = (typeof PLACEMENTS)[number]
+
+const Prefs = Schema.Struct({
+  placement: Schema.Literals(PLACEMENTS),
+  showBars: Schema.Boolean,
+  alerts: Schema.Boolean,
+  autoUpdate: Schema.Boolean,
+})
+
+function tone(used: number): string {
+  if (used >= 100) return "#ef4444"
+  if (used >= 80) return "#f59e0b"
+  return "#22c55e"
+}
+
+function MiniBar(props: { used: number; width?: number; light: boolean }) {
+  const track = () => (props.light ? "rgba(0,0,0,.14)" : "rgba(255,255,255,.16)")
+  const widthPct = () => Math.min(Math.max(props.used, 0), 100)
+  return (
+    <span
+      style={`display:inline-block;width:${props.width ?? 32}px;height:5px;background:${track()};border-radius:999px;overflow:hidden;vertical-align:middle;`}
+    >
+      <span style={`display:block;height:100%;width:${widthPct()}%;background:${tone(props.used)};`} />
+    </span>
+  )
+}
+
+function LimitsStrip(props: {
+  card: LimitCard | null
+  ready: boolean
+  lang: Locale
+  light: boolean
+  showBars: boolean
+  variant: "bottom" | "top"
+  onOpen: () => void
+}) {
+  const rows = () => props.card?.rows ?? []
+  const errorColor = () => (props.light ? "#b45309" : "#f59e0b")
+  const prefix = () => (props.lang === "ru" ? "лимиты" : "limits")
+  const noData = () => (props.lang === "ru" ? "нет данных" : "no data")
+
+  const buttonStyle = () => {
+    if (props.variant === "top") {
+      const border = props.light ? "rgba(0,0,0,.12)" : "rgba(255,255,255,.12)"
+      const bg = props.light ? "rgba(0,0,0,.04)" : "rgba(255,255,255,.05)"
+      return `background:${bg};border:1px solid ${border};border-radius:6px;margin:0;color:inherit;font:inherit;cursor:pointer;display:inline-flex;align-items:center;gap:8px;padding:4px 8px;font-size:11px;line-height:1.2;white-space:nowrap;`
+    }
+    return "background:transparent;border:0;margin:0;color:inherit;font:inherit;cursor:pointer;display:inline-flex;align-items:center;gap:12px;padding:3px 10px;font-size:11px;white-space:nowrap;"
+  }
+
+  return (
+    <button type="button" onClick={props.onOpen} style={buttonStyle()}>
+      <Show
+        when={props.card?.ok}
+        fallback={
+          <span style={`color:${errorColor()};`}>
+            {prefix()}: {props.ready ? props.card?.error || noData() : "…"}
+          </span>
+        }
+      >
+        <For each={rows()}>
+          {(row: LimitRow) => (
+            <span style="display:inline-flex;align-items:center;gap:5px;">
+              <span style="opacity:.6;">{windowLabel(row, props.lang)}</span>
+              <Show when={props.showBars}>
+                <MiniBar used={row.used} width={props.variant === "top" ? 24 : 32} light={props.light} />
+              </Show>
+              <span style="font-variant-numeric:tabular-nums;">{row.used}%</span>
+            </span>
+          )}
+        </For>
+      </Show>
+    </button>
+  )
+}
+
+export default Plugin.define({
+  stores: {
+    prefs: Store.global(Prefs, {
+      placement: "bottom",
+      showBars: true,
+      alerts: true,
+      autoUpdate: true,
+    }),
+  },
+  i18n: {
+    en: {
+      "command.limits": "OpenCode Go limits",
+      "command.settings": "OpenCode Go limits: settings",
+      "limits.ok": "OK",
+      "limits.refresh": "Refresh",
+      "limits.settings": "Settings",
+      "limits.reset": "reset",
+      "limits.in": "in",
+      "limits.noServer": "cannot reach plugin server",
+      "limits.failed": "Failed to load limits",
+      "settings.title": "OpenCode Go limits",
+      "settings.description": "Configure where limits are shown, alerts, and GitHub auto-updates",
+      "settings.section.display": "Display",
+      "settings.section.notifications": "Notifications",
+      "settings.section.updates": "Updates",
+      "settings.placement.title": "Widget position",
+      "settings.placement.description": "Where to show the usage indicator in OpenCode",
+      "settings.placement.bottom": "Bottom bar (default)",
+      "settings.placement.top": "Top bar (session header)",
+      "settings.placement.both": "Bottom + top bar",
+      "settings.placement.titlebar": "Titlebar / sidebar button",
+      "settings.placement.hidden": "Hidden (command only)",
+      "settings.bars.title": "Show mini progress bars",
+      "settings.bars.description": "Turn off for a compact text-only readout",
+      "settings.alerts.title": "Threshold alerts (80% / 100%)",
+      "settings.alerts.description": "Show a toast when any quota window reaches 80% or 100%",
+      "settings.autoUpdate.title": "Auto-update from GitHub",
+      "settings.autoUpdate.description": "Automatically download and install new releases from GitHub",
+      "settings.version.title": "Plugin version",
+      "settings.version.checking": "Checking for updates…",
+      "settings.version.upToDate": "v{{version}} · Up to date",
+      "settings.version.available": "v{{current}} → v{{latest}} available",
+      "settings.version.restart": "Updated to v{{version}} · Restart OpenCode Desktop to apply",
+      "settings.version.error": "v{{version}} · Check failed: {{error}}",
+      "settings.update.check": "Check now",
+      "settings.update.install": "Update now",
+      "settings.update.installedToast": "zen-limits updated to v{{version}}. Restart OpenCode Desktop to apply.",
+      "settings.update.failedToast": "Update failed: {{error}}",
+      "settings.done": "Done",
+      "settings.openAll": "Open in Settings",
+    },
+    ru: {
+      "command.limits": "Лимиты OpenCode Go",
+      "command.settings": "Лимиты OpenCode Go: настройки",
+      "limits.ok": "ОК",
+      "limits.refresh": "Обновить",
+      "limits.settings": "Настройки",
+      "limits.reset": "сброс",
+      "limits.in": "через",
+      "limits.noServer": "нет связи с сервером плагина",
+      "limits.failed": "Не удалось получить лимиты",
+      "settings.title": "Лимиты OpenCode Go",
+      "settings.description": "Настройка расположения, уведомлений и автообновлений с GitHub",
+      "settings.section.display": "Отображение",
+      "settings.section.notifications": "Уведомления",
+      "settings.section.updates": "Обновления",
+      "settings.placement.title": "Расположение виджета",
+      "settings.placement.description": "Где показывать индикатор лимитов в окне OpenCode",
+      "settings.placement.bottom": "Снизу (строка состояния)",
+      "settings.placement.top": "Сверху (в топбаре сессии)",
+      "settings.placement.both": "Снизу и сверху",
+      "settings.placement.titlebar": "Кнопка в заголовке / сайдбаре",
+      "settings.placement.hidden": "Скрыто (только /limits)",
+      "settings.bars.title": "Показывать мини-бары",
+      "settings.bars.description": "Отключите для компактного текстового вида",
+      "settings.alerts.title": "Уведомления о порогах (80% / 100%)",
+      "settings.alerts.description": "Показывать тост, когда окно доходит до 80% или 100%",
+      "settings.autoUpdate.title": "Автообновление с GitHub",
+      "settings.autoUpdate.description": "Автоматически скачивать и устанавливать новые релизы с GitHub",
+      "settings.version.title": "Версия плагина",
+      "settings.version.checking": "Проверка обновлений…",
+      "settings.version.upToDate": "v{{version}} · Актуальная версия",
+      "settings.version.available": "Доступна v{{latest}} (текущая v{{current}})",
+      "settings.version.restart": "Обновлено до v{{version}} · Перезапустите OpenCode Desktop",
+      "settings.version.error": "v{{version}} · Ошибка проверки: {{error}}",
+      "settings.update.check": "Проверить",
+      "settings.update.install": "Обновить",
+      "settings.update.installedToast": "zen-limits обновлён до v{{version}}. Перезапустите OpenCode Desktop.",
+      "settings.update.failedToast": "Не удалось обновить: {{error}}",
+      "settings.done": "Готово",
+      "settings.openAll": "В общих настройках",
+    },
+  },
+  setup(ctx) {
+    const ui = ctx.ui
+    const prefs = ctx.stores.prefs
+    const [card, setCard] = createSignal<LimitCard | null>(null)
+    const [ready, setReady] = createSignal(false)
+    const [refreshing, setRefreshing] = createSignal(false)
+    const [updateInfo, setUpdateInfo] = createSignal<UpdateStatusInfo | null>(null)
+    const [updateBusy, setUpdateBusy] = createSignal(false)
+    const notified = new Map<string, number>()
+    let notifiedUpdateVersion = ""
+
+    const lang = (): Locale => normalizeLocale(ctx.locale.locale())
+    const light = () => ctx.appearance.mode() === "light"
+
+    const placementOptions = () => [
+      { value: "bottom" as const, label: ctx.t("settings.placement.bottom") },
+      { value: "top" as const, label: ctx.t("settings.placement.top") },
+      { value: "both" as const, label: ctx.t("settings.placement.both") },
+      { value: "titlebar" as const, label: ctx.t("settings.placement.titlebar") },
+      { value: "hidden" as const, label: ctx.t("settings.placement.hidden") },
+    ]
+
+    function notifyUpdated(version: string) {
+      if (!version || version === notifiedUpdateVersion || ctx.signal.aborted) return
+      notifiedUpdateVersion = version
+      ctx.toast.show({
+        variant: "success",
+        title: ctx.t("settings.update.installedToast", { version }),
+      })
+    }
+
+    async function refresh(force = false): Promise<LimitCard | null> {
+      if (ctx.signal.aborted) return null
+      if (force) setRefreshing(true)
+      try {
+        const currentLang = lang()
+        const result = (await ctx.client
+          .rpc(Limits)
+          .status({ force, lang: currentLang }, { signal: ctx.signal })) as LimitCard
+        if (ctx.signal.aborted) return null
+        setCard(result)
+        setReady(true)
+        if (result.ok) {
+          const now = Date.now()
+          const triggered = newAlerts(result.rows, notified)
+          if (prefs.value.alerts) {
+            for (const row of triggered) {
+              ctx.toast.show({
+                variant: row.used >= 100 ? "error" : "default",
+                title: alertMessage(row, now, currentLang),
+              })
+            }
+          }
+        }
+        return result
+      } catch {
+        if (ctx.signal.aborted) return null
+        setCard(emptyCard(ctx.t("limits.noServer")))
+        setReady(true)
+        return null
+      } finally {
+        if (force && !ctx.signal.aborted) setRefreshing(false)
+      }
+    }
+
+    async function syncAutoUpdate(enabled: boolean) {
+      try {
+        await ctx.client.rpc(Limits).setUpdateConfig({ autoUpdate: enabled }, { signal: ctx.signal })
+      } catch {}
+    }
+
+    async function checkUpdates(checkNow = false) {
+      if (ctx.signal.aborted) return
+      if (checkNow) setUpdateBusy(true)
+      try {
+        const res = (await ctx.client
+          .rpc(Limits)
+          .updateStatus({ check: checkNow, autoInstall: prefs.value.autoUpdate }, { signal: ctx.signal })) as UpdateStatusInfo
+        if (ctx.signal.aborted) return
+        setUpdateInfo(res)
+        if (res.autoUpdated || res.restartRequired) {
+          notifyUpdated(res.latestVersion)
+        }
+      } catch {} finally {
+        if (checkNow && !ctx.signal.aborted) setUpdateBusy(false)
+      }
+    }
+
+    async function runManualInstall() {
+      if (ctx.signal.aborted) return
+      setUpdateBusy(true)
+      try {
+        const res = (await ctx.client.rpc(Limits).installUpdate({}, { signal: ctx.signal })) as {
+          ok: boolean
+          version: string
+          restartRequired: boolean
+          error: string
+        }
+        if (ctx.signal.aborted) return
+        if (!res.ok) {
+          ctx.toast.show({ variant: "error", title: ctx.t("settings.update.failedToast", { error: res.error }) })
+          return
+        }
+        if (res.restartRequired) notifyUpdated(res.version)
+        await checkUpdates(false)
+      } catch (error) {
+        if (!ctx.signal.aborted) {
+          ctx.toast.show({ variant: "error", title: ctx.t("settings.update.failedToast", { error: String(error) }) })
+        }
+      } finally {
+        if (!ctx.signal.aborted) setUpdateBusy(false)
+      }
+    }
+
+    void retry(() => refresh(), (r) => r !== null, 5, undefined, ctx.signal).then(() => {
+      if (ctx.signal.aborted) return
+      void syncAutoUpdate(prefs.value.autoUpdate)
+      void checkUpdates(false)
+    })
+
+    createEffect(
+      on(
+        lang,
+        () => {
+          if (ready()) void refresh(false)
+        },
+        { defer: true },
+      ),
+    )
+
+    const timer = setInterval(() => void refresh(), 90_000)
+    onCleanup(() => clearInterval(timer))
+
+    try {
+      const rpcClient = ctx.client.rpc(Limits) as {
+        events?: {
+          on?: (
+            name: "changed" | "updated",
+            fn: (ev: { data?: { version?: string } }) => void,
+            opts?: { signal?: AbortSignal },
+          ) => () => void
+        }
+      }
+      const stopChanged = rpcClient.events?.on?.("changed", () => void refresh(), { signal: ctx.signal })
+      if (stopChanged) onCleanup(stopChanged)
+      const stopUpdated = rpcClient.events?.on?.(
+        "updated",
+        (ev) => {
+          const v = ev?.data?.version
+          if (v) {
+            notifyUpdated(v)
+            void checkUpdates(false)
+          }
+        },
+        { signal: ctx.signal },
+      )
+      if (stopUpdated) onCleanup(stopUpdated)
+    } catch {}
+
+    function SettingField(props: {
+      page?: boolean
+      id: string
+      title: string
+      description: string
+      children: JSX.Element
+    }) {
+      return (
+        <Show
+          when={props.page}
+          fallback={
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;">
+              <div style="display:flex;flex-direction:column;gap:2px;">
+                <div style="font-size:13px;font-weight:500;">{props.title}</div>
+                <div style="font-size:11px;opacity:.65;">{props.description}</div>
+              </div>
+              {props.children}
+            </div>
+          }
+        >
+          <ui.SettingsRow id={props.id} title={props.title} description={props.description}>
+            {props.children}
+          </ui.SettingsRow>
+        </Show>
+      )
+    }
+
+    function DisplayFields(props: { page?: boolean }) {
+      return (
+        <>
+          <SettingField
+            page={props.page}
+            id="zen-limits-placement"
+            title={ctx.t("settings.placement.title")}
+            description={ctx.t("settings.placement.description")}
+          >
+            <ui.Select<Placement>
+              label={ctx.t("settings.placement.title")}
+              options={placementOptions()}
+              value={prefs.value.placement}
+              onChange={(value) => prefs.update((draft) => { draft.placement = value })}
+            />
+          </SettingField>
+          <SettingField
+            page={props.page}
+            id="zen-limits-bars"
+            title={ctx.t("settings.bars.title")}
+            description={ctx.t("settings.bars.description")}
+          >
+            <ui.Switch
+              label={ctx.t("settings.bars.title")}
+              hideLabel
+              checked={prefs.value.showBars}
+              onChange={(checked) => prefs.update((draft) => { draft.showBars = checked })}
+            />
+          </SettingField>
+        </>
+      )
+    }
+
+    function NotificationFields(props: { page?: boolean }) {
+      return (
+        <SettingField
+          page={props.page}
+          id="zen-limits-alerts"
+          title={ctx.t("settings.alerts.title")}
+          description={ctx.t("settings.alerts.description")}
+        >
+          <ui.Switch
+            label={ctx.t("settings.alerts.title")}
+            hideLabel
+            checked={prefs.value.alerts}
+            onChange={(checked) => prefs.update((draft) => { draft.alerts = checked })}
+          />
+        </SettingField>
+      )
+    }
+
+    function updateDescription(): string {
+      const info = updateInfo()
+      if (!info) return ctx.t("settings.version.checking")
+      if (info.restartRequired) return ctx.t("settings.version.restart", { version: info.latestVersion })
+      if (info.error) return ctx.t("settings.version.error", { version: info.currentVersion, error: info.error })
+      if (info.updateAvailable) {
+        return ctx.t("settings.version.available", { current: info.currentVersion, latest: info.latestVersion })
+      }
+      return ctx.t("settings.version.upToDate", { version: info.currentVersion })
+    }
+
+    function UpdateFields(props: { page?: boolean }) {
+      const canInstall = () => !!updateInfo()?.updateAvailable && !updateInfo()?.restartRequired
+      return (
+        <>
+          <SettingField
+            page={props.page}
+            id="zen-limits-autoupdate"
+            title={ctx.t("settings.autoUpdate.title")}
+            description={ctx.t("settings.autoUpdate.description")}
+          >
+            <ui.Switch
+              label={ctx.t("settings.autoUpdate.title")}
+              hideLabel
+              checked={prefs.value.autoUpdate}
+              onChange={(checked) => {
+                prefs.update((draft) => { draft.autoUpdate = checked })
+                void syncAutoUpdate(checked)
+              }}
+            />
+          </SettingField>
+          <SettingField
+            page={props.page}
+            id="zen-limits-version"
+            title={ctx.t("settings.version.title")}
+            description={updateDescription()}
+          >
+            <Show
+              when={canInstall()}
+              fallback={
+                <ui.Button
+                  variant="neutral"
+                  size="small"
+                  icon="refresh"
+                  busy={updateBusy()}
+                  onClick={() => void checkUpdates(true)}
+                >
+                  {ctx.t("settings.update.check")}
+                </ui.Button>
+              }
+            >
+              <ui.Button
+                variant="contrast"
+                size="small"
+                icon="download"
+                busy={updateBusy()}
+                onClick={() => void runManualInstall()}
+              >
+                {ctx.t("settings.update.install")}
+              </ui.Button>
+            </Show>
+          </SettingField>
+        </>
+      )
+    }
+
+    function openSettingsDialog() {
+      void checkUpdates(false)
+      ctx.dialogs.open((dialog) => (
+        <ui.Dialog
+          title={ctx.t("settings.title")}
+          description={ctx.t("settings.description")}
+          size="fit"
+          footer={
+            <div style="display:flex;align-items:center;justify-content:space-between;width:100%;gap:8px;">
+              <ui.Button
+                variant="ghost"
+                icon="sliders"
+                onClick={() => {
+                  dialog.close()
+                  ctx.layout.settings(ctx.id)
+                }}
+              >
+                {ctx.t("settings.openAll")}
+              </ui.Button>
+              <ui.Button variant="contrast" autofocus onClick={dialog.close}>
+                {ctx.t("settings.done")}
+              </ui.Button>
+            </div>
+          }
+        >
+          <div style="display:flex;flex-direction:column;gap:14px;min-width:420px;">
+            <DisplayFields />
+            <NotificationFields />
+            <UpdateFields />
+          </div>
+        </ui.Dialog>
+      ))
+    }
+
+    function openCard(initial: LimitCard) {
+      ctx.dialogs.open((dialog) => {
+        const [now, setNow] = createSignal(Date.now())
+        const tick = setInterval(() => setNow(Date.now()), 30_000)
+        onCleanup(() => clearInterval(tick))
+
+        const current = () => {
+          const latest = card()
+          return latest?.ok ? latest : initial
+        }
+
+        const description = () => {
+          const c = current()
+          const source = sourceLabel(c.source, lang())
+          return `${c.org}${c.email ? ` · ${c.email}` : ""} · ${c.checkedAt}${source ? ` · ${source}` : ""}`
+        }
+
+        const handleRefresh = async () => {
+          const next = await refresh(true)
+          if (ctx.signal.aborted) return
+          setNow(Date.now())
+          if (!next || !next.ok) {
+            ctx.toast.show({ variant: "error", title: next?.error ?? ctx.t("limits.failed") })
+          }
+        }
+
+        return (
+          <ui.Dialog
+            title={ctx.t("command.limits")}
+            description={description()}
+            size="fit"
+            footer={
+              <div style="display:flex;align-items:center;justify-content:space-between;width:100%;gap:8px;">
+                <ui.Tooltip value={ctx.t("limits.settings")}>
+                  <ui.IconButton
+                    icon="settings-gear"
+                    label={ctx.t("limits.settings")}
+                    variant="neutral"
+                    onClick={() => {
+                      dialog.close()
+                      openSettingsDialog()
+                    }}
+                  />
+                </ui.Tooltip>
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <ui.Button variant="neutral" icon="refresh" busy={refreshing()} onClick={() => void handleRefresh()}>
+                    {ctx.t("limits.refresh")}
+                  </ui.Button>
+                  <ui.Button variant="contrast" autofocus onClick={dialog.close}>
+                    {ctx.t("limits.ok")}
+                  </ui.Button>
+                </div>
+              </div>
+            }
+          >
+            <div style="display:flex;flex-direction:column;gap:8px;min-width:380px;">
+              <For each={current().rows}>
+                {(row: LimitRow) => {
+                  const resetLine = () => {
+                    const r = resetText(row.resetsAtMs, row.resetsIn, now(), lang())
+                    return r.passed
+                      ? `${ctx.t("limits.reset")} ${row.resetsAt} · ${r.text}`
+                      : `${ctx.t("limits.reset")} ${row.resetsAt} · ${ctx.t("limits.in")} ${r.text}`
+                  }
+                  return (
+                    <div style="display:flex;align-items:center;gap:10px;font-size:12px;">
+                      <span style="width:24px;opacity:.7;">{windowLabel(row, lang())}</span>
+                      <MiniBar used={row.used} width={70} light={light()} />
+                      <span style="width:34px;text-align:right;font-variant-numeric:tabular-nums;">{row.used}%</span>
+                      <span style="opacity:.55;font-size:11px;">
+                        {resetLine()}
+                        {row.status !== "ok" ? ` · ${row.status}` : ""}
+                      </span>
+                    </div>
+                  )
+                }}
+              </For>
+              <div style="font-size:11px;opacity:.7;">{tightLine(current().rows, now(), lang())}</div>
+            </div>
+          </ui.Dialog>
+        )
+      })
+    }
+
+    async function showLimits(instantIfCached = false) {
+      const cached = card()
+      if (instantIfCached && cached?.ok) {
+        openCard(cached)
+        void refresh(true)
+        return
+      }
+      const result = await refresh(true)
+      if (ctx.signal.aborted) return
+      if (!result || !result.ok) {
+        ctx.toast.show({ variant: "error", title: result?.error ?? ctx.t("limits.failed") })
+        return
+      }
+      openCard(result)
+    }
+
+    ctx.add(Command, (): Command => ({
+      id: "limits",
+      title: ctx.t("command.limits"),
+      bind: "ctrl+shift+l",
+      slash: { name: "limits" },
+      run: () => showLimits(false),
+    }))
+
+    ctx.add(Command, (): Command => ({
+      id: "settings",
+      title: ctx.t("command.settings"),
+      slash: { name: "limits-settings" },
+      run: () => openSettingsDialog(),
+    }))
+
+    ctx.add(SettingsPage, (): SettingsPage => ({
+      id: ctx.id,
+      title: ctx.t("settings.title"),
+      icon: "sliders",
+      entries: [
+        {
+          id: ctx.id,
+          title: ctx.t("settings.title"),
+          description: ctx.t("settings.description"),
+          keywords: "zen limits opencode go quota usage",
+        },
+        {
+          id: "zen-limits-placement",
+          title: ctx.t("settings.placement.title"),
+          description: ctx.t("settings.placement.description"),
+          keywords: "position bottom top header titlebar sidebar",
+        },
+        {
+          id: "zen-limits-bars",
+          title: ctx.t("settings.bars.title"),
+          description: ctx.t("settings.bars.description"),
+          keywords: "bars compact progress",
+        },
+        {
+          id: "zen-limits-alerts",
+          title: ctx.t("settings.alerts.title"),
+          description: ctx.t("settings.alerts.description"),
+          keywords: "toast alert 80 100 notification",
+        },
+        {
+          id: "zen-limits-autoupdate",
+          title: ctx.t("settings.autoUpdate.title"),
+          description: ctx.t("settings.autoUpdate.description"),
+          keywords: "update github release autoupdate",
+        },
+        {
+          id: "zen-limits-version",
+          title: ctx.t("settings.version.title"),
+          keywords: "version check update",
+        },
+      ],
+      render: () => (
+        <ui.SettingsLayout
+          title={ctx.t("settings.title")}
+          description={ctx.t("settings.description")}
+          actions={
+            <ui.Button variant="neutral" icon="refresh" busy={refreshing()} onClick={() => void refresh(true)}>
+              {ctx.t("limits.refresh")}
+            </ui.Button>
+          }
+        >
+          <ui.SettingsSection title={ctx.t("settings.section.display")}>
+            <DisplayFields page />
+          </ui.SettingsSection>
+
+          <ui.SettingsSection title={ctx.t("settings.section.notifications")}>
+            <NotificationFields page />
+          </ui.SettingsSection>
+
+          <ui.SettingsSection title={ctx.t("settings.section.updates")}>
+            <UpdateFields page />
+          </ui.SettingsSection>
+        </ui.SettingsLayout>
+      ),
+    }))
+
+    const showBottom = () => prefs.value.placement === "bottom" || prefs.value.placement === "both"
+    const showTop = () => prefs.value.placement === "top" || prefs.value.placement === "both"
+
+    ctx.add(Slot, {
+      at: "window.bottom",
+      render: () => (
+        <Show when={showBottom()}>
+          <ui.Tooltip value={ctx.t("command.limits")} keys={ctx.keybinds.keybind(`${ctx.id}.limits`)}>
+            <LimitsStrip
+              card={card()}
+              ready={ready()}
+              lang={lang()}
+              light={light()}
+              showBars={prefs.value.showBars}
+              variant="bottom"
+              onOpen={() => void showLimits(true)}
+            />
+          </ui.Tooltip>
+        </Show>
+      ),
+    })
+
+    ctx.add(Slot, {
+      at: "session.header",
+      order: 20,
+      render: (input) => (
+        <Show when={showTop() && input.active}>
+          <ui.Tooltip value={ctx.t("command.limits")} keys={ctx.keybinds.keybind(`${ctx.id}.limits`)}>
+            <LimitsStrip
+              card={card()}
+              ready={ready()}
+              lang={lang()}
+              light={light()}
+              showBars={prefs.value.showBars && !input.compact}
+              variant="top"
+              onOpen={() => void showLimits(true)}
+            />
+          </ui.Tooltip>
+        </Show>
+      ),
+    })
+
+    ctx.add(TitlebarItem, (): TitlebarItem | undefined => {
+      if (prefs.value.placement !== "titlebar") return undefined
+      const current = card()
+      const l = lang()
+      const label = current?.ok
+        ? current.rows.map((r) => `${windowLabel(r, l)} ${r.used}%`).join(" · ")
+        : `${l === "ru" ? "лимиты" : "limits"}: ${ready() ? current?.error || "—" : "…"}`
+      return {
+        id: "limits",
+        label,
+        title: `${ctx.t("command.limits")}: ${label}`,
+        icon: "status",
+        run: () => void showLimits(true),
+      }
+    })
+  },
+})

@@ -1,0 +1,44 @@
+{
+  "name": "opencode-zen-limits",
+  "version": "1.4.0",
+  "description": "OpenCode Go usage limits (5h / 1w / 1m) for OpenCode TUI and Desktop GUI",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cusvv/zen-limits.git"
+  },
+  "homepage": "https://github.com/cusvv/zen-limits#readme",
+  "bugs": {
+    "url": "https://github.com/cusvv/zen-limits/issues"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./tui": "./src/tui.tsx",
+    "./gui-experimental": "./dist/gui-experimental.cjs",
+    "./rpc": "./src/rpc.ts"
+  },
+  "files": [
+    "src",
+    "dist",
+    "README.md",
+    "LICENSE",
+    "tsconfig.json",
+    "tsconfig.gui.json",
+    "vite.config.ts"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.gui.json",
+    "test": "node --experimental-strip-types --test src/*.test.ts",
+    "build": "npm run typecheck && vite build"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.3.0",
+    "@opentui/core": "^0.9.2",
+    "@opentui/solid": "^0.9.2",
+    "solid-js": "^1.9.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.0.0",
+    "vite-plugin-solid": "^2.11.0"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "@opentui/solid",
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "src/tui.tsx", "vite.config.ts"],
+  "exclude": ["src/gui.tsx"]
+}
