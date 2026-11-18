@@ -193,15 +193,15 @@ export default Plugin.define({
       "settings.placement.hidden": "Hidden (command only)",
       "settings.preview.label": "Preview",
       "settings.windows.title": "Windows in strip",
-      "settings.windows.description": "Choose which quota windows appear on the bar (click widget for all)",
+      "settings.windows.description": "Choose which windows appear on the bar",
       "settings.windows.all": "All",
       "settings.style.title": "Indicator style",
-      "settings.style.description": "Choose between mini progress bars, text only, or bars only",
+      "settings.style.description": "Bars with %, text only, or bars only",
       "settings.style.bars_pct": "Bar + %",
       "settings.style.text": "Text only",
       "settings.style.bars": "Bars only",
       "settings.labels.title": "Show window labels",
-      "settings.labels.description": "Show 5h, 1w, 1m prefixes before each indicator",
+      "settings.labels.description": "Show 5h, 1w, 1m prefixes",
       "settings.alerts.title": "Threshold alerts (80% / 100%)",
       "settings.alerts.description": "Show a toast when any quota window reaches 80% or 100%",
       "settings.autoUpdate.title": "Auto-update from GitHub",
@@ -246,15 +246,15 @@ export default Plugin.define({
       "settings.placement.hidden": "Скрыто (только /limits)",
       "settings.preview.label": "Предпросмотр",
       "settings.windows.title": "Окна в мини-барах",
-      "settings.windows.description": "Выберите, какие лимиты показывать на панели (по клику видны все)",
+      "settings.windows.description": "Какие лимиты показывать на панели",
       "settings.windows.all": "Все",
       "settings.style.title": "Вид индикатора",
-      "settings.style.description": "Показывать бары с процентами, только текст или только бары",
+      "settings.style.description": "Бары с %, только текст или только бары",
       "settings.style.bars_pct": "Бар + %",
       "settings.style.text": "Без баров",
       "settings.style.bars": "Только бары",
-      "settings.labels.title": "Показывать подписи окон",
-      "settings.labels.description": "Отображать префиксы 5ч, 1н, 1м перед значениями",
+      "settings.labels.title": "Подписи окон",
+      "settings.labels.description": "Показывать префиксы 5ч, 1н, 1м",
       "settings.alerts.title": "Уведомления о порогах (80% / 100%)",
       "settings.alerts.description": "Показывать тост, когда окно доходит до 80% или 100%",
       "settings.autoUpdate.title": "Автообновление с GitHub",
@@ -491,12 +491,12 @@ export default Plugin.define({
         <Show
           when={props.page}
           fallback={
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;">
-              <div style="display:flex;flex-direction:column;gap:2px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;box-sizing:border-box;">
+              <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;">
                 <div style="font-size:13px;font-weight:500;">{props.title}</div>
                 <div style="font-size:11px;opacity:.65;">{props.description}</div>
               </div>
-              {props.children}
+              <div style="flex-shrink:0;display:flex;align-items:center;">{props.children}</div>
             </div>
           }
         >
@@ -509,42 +509,59 @@ export default Plugin.define({
 
     function DisplayFields(props: { page?: boolean }) {
       const previewCard = () => (card()?.ok ? card()! : SAMPLE_CARD)
-      const previewBoxStyle = () => {
-        const border = light() ? "rgba(0,0,0,.12)" : "rgba(255,255,255,.12)"
+      const previewBannerStyle = () => {
+        const border = light() ? "rgba(0,0,0,.1)" : "rgba(255,255,255,.1)"
         const bg = light() ? "rgba(0,0,0,.03)" : "rgba(255,255,255,.03)"
-        return `display:inline-flex;align-items:center;padding:3px 6px;border-radius:8px;border:1px solid ${border};background:${bg};`
+        return `width:100%;box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;border-radius:8px;border:1px solid ${border};background:${bg};`
       }
       const winItems: Array<{ key: WindowKey; active: () => boolean }> = [
         { key: "rolling", active: () => strip.value.show5h },
         { key: "weekly", active: () => strip.value.show1w },
         { key: "monthly", active: () => strip.value.show1m },
       ]
-      const styleItems: StripStyle[] = ["bars_pct", "text", "bars"]
+      const styleOptions = () => [
+        { value: "bars_pct" as const, label: ctx.t("settings.style.bars_pct") },
+        { value: "text" as const, label: ctx.t("settings.style.text") },
+        { value: "bars" as const, label: ctx.t("settings.style.bars") },
+      ]
+
+      const previewStrip = () => (
+        <LimitsStrip
+          card={previewCard()}
+          ready={true}
+          lang={lang()}
+          light={light()}
+          showBars={prefs.value.showBars}
+          showPercent={strip.value.showPercent}
+          showLabels={strip.value.showLabels}
+          visible={visibleWindows()}
+          variant={prefs.value.placement === "top" ? "top" : "bottom"}
+          preview
+          onOpen={() => {}}
+        />
+      )
 
       return (
         <>
-          <SettingField
-            page={props.page}
-            id="zen-limits-preview"
-            title={ctx.t("settings.preview.label")}
-            description={ctx.t(`settings.placement.${prefs.value.placement}`)}
+          <Show
+            when={props.page}
+            fallback={
+              <div style={previewBannerStyle()}>
+                <span style="font-size:11px;opacity:.65;flex-shrink:0;">{ctx.t("settings.preview.label")}</span>
+                <div style="min-width:0;overflow:hidden;display:flex;justify-content:flex-end;">
+                  {previewStrip()}
+                </div>
+              </div>
+            }
           >
-            <div style={previewBoxStyle()}>
-              <LimitsStrip
-                card={previewCard()}
-                ready={true}
-                lang={lang()}
-                light={light()}
-                showBars={prefs.value.showBars}
-                showPercent={strip.value.showPercent}
-                showLabels={strip.value.showLabels}
-                visible={visibleWindows()}
-                variant={prefs.value.placement === "top" ? "top" : "bottom"}
-                preview
-                onOpen={() => {}}
-              />
-            </div>
-          </SettingField>
+            <ui.SettingsRow
+              id="zen-limits-preview"
+              title={ctx.t("settings.preview.label")}
+              description={ctx.t(`settings.placement.${prefs.value.placement}`)}
+            >
+              {previewStrip()}
+            </ui.SettingsRow>
+          </Show>
           <SettingField
             page={props.page}
             id="zen-limits-placement"
@@ -564,7 +581,7 @@ export default Plugin.define({
             title={ctx.t("settings.windows.title")}
             description={ctx.t("settings.windows.description")}
           >
-            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
+            <div style="display:flex;align-items:center;gap:4px;flex-wrap:nowrap;">
               <For each={winItems}>
                 {(item) => (
                   <ui.Button
@@ -589,19 +606,12 @@ export default Plugin.define({
             title={ctx.t("settings.style.title")}
             description={ctx.t("settings.style.description")}
           >
-            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
-              <For each={styleItems}>
-                {(item) => (
-                  <ui.Button
-                    size="small"
-                    variant={stripStyle() === item ? "contrast" : "neutral"}
-                    onClick={() => setStripStyle(item)}
-                  >
-                    {ctx.t(`settings.style.${item}`)}
-                  </ui.Button>
-                )}
-              </For>
-            </div>
+            <ui.Select<StripStyle>
+              label={ctx.t("settings.style.title")}
+              options={styleOptions()}
+              value={stripStyle()}
+              onChange={setStripStyle}
+            />
           </SettingField>
           <SettingField
             page={props.page}
@@ -729,7 +739,7 @@ export default Plugin.define({
             </div>
           }
         >
-          <div style="display:flex;flex-direction:column;gap:14px;min-width:460px;">
+          <div style="display:flex;flex-direction:column;gap:12px;width:100%;box-sizing:border-box;">
             <DisplayFields />
             <NotificationFields />
             <UpdateFields />
@@ -811,7 +821,7 @@ export default Plugin.define({
               </div>
             }
           >
-            <div style="display:flex;flex-direction:column;gap:8px;min-width:380px;">
+            <div style="display:flex;flex-direction:column;gap:8px;width:100%;box-sizing:border-box;">
               <For each={current().rows}>
                 {(row: LimitRow) => {
                   const resetLine = () => {
