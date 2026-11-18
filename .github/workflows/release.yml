@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: npm install --no-audit --no-fund
+      - run: npm test
+      - run: npm run build
+
+      - name: Verify tag matches package.json version
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          PKG_VER="$(node -p "require('./package.json').version")"
+          if [ "$TAG_VER" != "$PKG_VER" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $PKG_VER" >&2
+            exit 1
+          fi
+
+      - name: Package release archives
+        run: |
+          STAGE_DIR="$(mktemp -d)"
+          PKG_DIR="$STAGE_DIR/opencode-limits-go"
+          mkdir -p "$PKG_DIR"
+          while IFS= read -r rel; do
+            mkdir -p "$PKG_DIR/$(dirname "$rel")"
+            cp "$rel" "$PKG_DIR/$rel"
+          done < <(git ls-files)
+          cp dist/gui-experimental.cjs "$PKG_DIR/dist/gui-experimental.cjs"
+          mkdir -p release-assets
+          tar -czf release-assets/opencode-limits-go.tar.gz -C "$STAGE_DIR" opencode-limits-go
+          (cd "$STAGE_DIR" && zip -qr "$GITHUB_WORKSPACE/release-assets/opencode-limits-go.zip" opencode-limits-go)
+          rm -rf "$STAGE_DIR"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release-assets/opencode-limits-go.tar.gz release-assets/opencode-limits-go.zip --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release-assets/opencode-limits-go.tar.gz release-assets/opencode-limits-go.zip --title "$GITHUB_REF_NAME" --generate-notes
+          fi
+
+  npm:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - name: Publish to npm (Trusted Publishing or NPM_TOKEN)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
