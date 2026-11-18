@@ -294,7 +294,29 @@ export function cardText(card: LimitCard, lang: Locale = "en"): string {
   return card.rows.map((row) => `${windowLabel(row, lang)} ${row.used}%`).join(" · ")
 }
 
-export function cardDetail(card: LimitCard, now = Date.now(), lang: Locale = "en"): string {
+export function formatTuiSidebar(
+  card: LimitCard,
+  visible: VisibleWindows,
+  showBars = false,
+  lang: Locale = "en",
+  now = Date.now(),
+): string {
+  if (!card.ok) return cardText(card, lang)
+  return filterStripRows(card.rows, visible)
+    .map((row) => {
+      const lbl = windowLabel(row, lang)
+      const hot = estimateWindowPace(row, now, lang, card.snapshots)?.kind === "hot" ? "⚡" : ""
+      return showBars ? `${lbl} ${bar(row.used, 4)} ${row.used}%${hot}` : `${lbl} ${row.used}%${hot}`
+    })
+    .join(" · ")
+}
+
+export function cardDetail(
+  card: LimitCard,
+  now = Date.now(),
+  lang: Locale = "en",
+  extraLines: readonly string[] = [],
+): string {
   const source = sourceLabel(card.source, lang)
   const checkedPrefix = lang === "ru" ? "Проверено" : "Checked"
   const header = `${checkedPrefix}: ${card.checkedAt}${source ? ` · ${source}` : ""}`
@@ -313,6 +335,9 @@ export function cardDetail(card: LimitCard, now = Date.now(), lang: Locale = "en
   const pace = paceSummary(card.rows, now, lang, card.snapshots)
   const lines = [header, "", ...rows, "", tightLineStr]
   if (pace) lines.push(pace.text)
+  for (const extra of extraLines) {
+    if (extra) lines.push(extra)
+  }
   return lines.join("\n")
 }
 

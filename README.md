@@ -13,6 +13,25 @@ Displays live usage across all three OpenCode Go windows — **5-hour rolling**,
 
 ---
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/limits-dialog.png" alt="Desktop GUI limits dialog and topbar indicator" width="760" />
+</p>
+
+<details>
+<summary>More screenshots: Settings dialog &amp; Terminal TUI</summary>
+<br />
+<p align="center">
+  <img src="docs/settings-dialog.png" alt="Settings dialog with live preview and presets" width="520" />
+</p>
+<p align="center">
+  <img src="docs/tui-limits.png" alt="Terminal TUI sidebar indicator and limits popup" width="760" />
+</p>
+</details>
+
+---
+
 ## Features
 
 - **All OpenCode Go windows**: `5h` / `1w` / `1m` percentages, reset timestamps, countdowns, elapsed-time markers (`|`), recent `~1h` deltas, and tightest-window summary.
@@ -33,9 +52,10 @@ Displays live usage across all three OpenCode Go windows — **5-hour rolling**,
   - Instant activity updates on model turns and window focus
   - Light & dark theme support
 - **TUI**:
-  - Live sidebar indicator (`sidebar.content`) with semantic theme colors and `/limits-windows` selector
-  - `/limits` slash command, command palette entry, and `Ctrl+Shift+L` shortcut
-  - Auto-refreshes on `session.usage.updated`, periodically, and on credential changes
+  - Live sidebar indicator (`sidebar.content`) with semantic theme colors, optional mini-bars, and `⚡` burn indicator
+  - `/limits` popup with Go windows, smart pace, `+1h` delta, and today's Go/Zen usage
+  - `/limits-settings` & `/limits-windows` interactive selectors (toggle bars, window filter, thresholds, update check)
+  - Command palette entries and `Ctrl+Shift+L` shortcut; auto-refreshes on `session.usage.updated`, periodically, and on credential changes
 - **Bilingual (English / Russian)**: Automatically follows the OpenCode UI language (Desktop `ctx.locale`, or `OPENCODE_LANG` / `LC_ALL` / `LANG` in TUI).
 - **Auto-Update**: Checks [GitHub Releases](https://github.com/cusvv/opencode-limits-go/releases) for new versions and automatically installs updates in the background (can be toggled or triggered manually in Settings).
 - **Security-first**: Tokens never leave the server process — never sent over RPC, never shown in the UI, and automatically redacted from logs (`%TEMP%/opencode-limits-go.log` or `/tmp/opencode-limits-go.log`).
@@ -109,7 +129,7 @@ Restart **OpenCode Desktop** (and run `/reload` in open TUI sessions). No `npm i
 | Action | Shortcut / Command |
 |---|---|
 | Show limits dialog | `/limits` or `Ctrl+Shift+L` (or click the indicator in Desktop) |
-| Open plugin settings (Desktop) | `/limits-settings`, gear button in dialog, or `Settings → OpenCode Go limits` |
+| Open plugin settings (Desktop & TUI) | `/limits-settings`, gear button in dialog, or `Settings → OpenCode Go limits` |
 | Filter TUI sidebar windows | `/limits-windows` |
 
 ### Verify via CLI

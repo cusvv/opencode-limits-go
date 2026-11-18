@@ -367,3 +367,33 @@ test("newAlerts supports custom warning thresholds and summarizeStatsByProvider 
   assert.equal(formatUsd(0.046), "$0.05")
   assert.equal(formatUsd(0.004), "$0.0040")
 })
+
+test("formatTuiSidebar supports window filter, inline mini-bars, and hot pace indicator", async () => {
+  const { cardDetail, formatTuiSidebar } = await import("./model.ts")
+  const now = 1_700_000_000_000
+  const hourMs = 3_600_000
+  const card = {
+    ok: true as const,
+    org: "Personal",
+    email: "dev@example.com",
+    source: "integration:oauth",
+    checkedAt: "14:20:05",
+    tight: "",
+    error: "",
+    rows: [
+      { key: "rolling" as const, label: "5h", used: 50, status: "ok", resetsAt: "18:00", resetsAtMs: now + 4 * hourMs, resetsIn: "4h", delta1h: 12 },
+      { key: "weekly" as const, label: "1w", used: 26, status: "ok", resetsAt: "Sun", resetsAtMs: now + 5 * 86_400_000, resetsIn: "5d" },
+    ],
+  }
+
+  const plain = formatTuiSidebar(card, { rolling: true, weekly: false, monthly: false }, false, "en", now)
+  assert.equal(plain, "5h 50%⚡")
+
+  const withBars = formatTuiSidebar(card, { rolling: true, weekly: true, monthly: false }, true, "en", now)
+  assert.ok(withBars.includes("5h ██░░ 50%⚡"))
+  assert.ok(withBars.includes("1w █░░░ 26%"))
+
+  const detail = cardDetail(card, now, "en", ["Today: Go 142k tok · Zen $0.04"])
+  assert.ok(detail.includes("+12%"))
+  assert.ok(detail.includes("Today: Go 142k tok · Zen $0.04"))
+})
