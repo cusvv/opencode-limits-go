@@ -94,14 +94,13 @@ export default Plugin.define({
 
     function notify(message: string, variant: "info" | "warning" | "error"): void {
       ctx.ui.toast.show({ message, variant })
-      void ctx.attention
-        ?.notify({
-          title: copy().title,
-          message,
-          notification: { when: "blurred" },
-          sound: { when: "blurred" },
-        })
-        .catch(() => {})
+      const pending = ctx.attention?.notify({
+        title: copy().title,
+        message,
+        notification: { when: "blurred" },
+        sound: { when: "blurred" },
+      })
+      void pending?.catch(() => {})
     }
 
     async function pullSharedPrefs() {

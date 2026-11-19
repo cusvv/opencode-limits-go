@@ -489,9 +489,8 @@ export default Plugin.define({
 
     function notify(title: string, variant: "default" | "success" | "error"): void {
       ctx.toast.show({ variant, title })
-      void ctx.attention
-        ?.notify({ title, variant: variant === "error" ? "error" : "default" })
-        .catch(() => {})
+      const pending = ctx.attention?.notify({ title, variant: variant === "error" ? "error" : "default" })
+      void pending?.catch(() => {})
     }
 
     async function refresh(force = false): Promise<LimitCard | null> {
@@ -1735,7 +1734,11 @@ export default Plugin.define({
                       </span>
                       <Show when={row.delta1h && row.delta1h > 0}>
                         <ui.Tooltip value={deltaTooltip()}>
-                          <span style="font-size:10px;opacity:.6;font-variant-numeric:tabular-nums;flex-shrink:0;">
+                          <span
+                            tabIndex={0}
+                            aria-label={deltaTooltip()}
+                            style="font-size:10px;opacity:.7;font-variant-numeric:tabular-nums;flex-shrink:0;"
+                          >
                             +{row.delta1h}%
                           </span>
                         </ui.Tooltip>
@@ -1918,6 +1921,16 @@ export default Plugin.define({
           title: t("settings.title"),
           description: t("settings.description"),
           keywords: "opencode go limits quota usage zen",
+        },
+        {
+          id: "opencode-limits-go-preview",
+          title: t("settings.preview.label"),
+          keywords: "preview strip appearance",
+        },
+        {
+          id: "opencode-limits-go-presets",
+          title: t("settings.presets.title"),
+          keywords: "presets quick standard minimal text only5h",
         },
         {
           id: "opencode-limits-go-placement",

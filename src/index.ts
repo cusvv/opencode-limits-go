@@ -217,6 +217,10 @@ export default Plugin.define({
       if (typeof rec.account === "string") historyAccount = rec.account
       history = sanitizeSnapshots(rec.snapshots)
     }
+    if (diskCache && historyAccount && historyAccount !== accountKey(diskCache.org, diskCache.email, diskCache.source)) {
+      history = []
+      historyAccount = ""
+    }
 
     const savedAuto = await ctx.storage.get("autoUpdate").catch(() => undefined)
     let autoUpdate =
