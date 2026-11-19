@@ -7,7 +7,9 @@ import {
   type Locale,
   type VisibleWindows,
   alertMessage,
+  burnSpikeMessage,
   cardDetail,
+  detectBurnSpike,
   emptyCard,
   errorText,
   filterStripRows,
@@ -27,6 +29,8 @@ type TuiPrefs = VisibleWindows & {
   showBars?: boolean
   showRemaining?: boolean
   warnThreshold?: number
+  burnSpikePct?: number
+  langOverride?: string
 }
 
 const COPY = {
@@ -95,20 +99,33 @@ const COPY = {
 export default Plugin.define({
   id: "opencode-limits-go.tui",
   setup(ctx) {
-    const lang: Locale = normalizeLocale(
+    const baseLang: Locale = normalizeLocale(
       typeof ctx.options.lang === "string"
         ? ctx.options.lang
         : process.env.OPENCODE_LANG || process.env.LC_ALL || process.env.LANG,
     )
-    const copy = COPY[lang]
 
     const [tuiPrefs, setTuiPrefs] = ctx.storage.store<TuiPrefs>("opencode-limits-go.tui", {
-      initial: { rolling: true, weekly: true, monthly: true, showBars: false, showRemaining: false, warnThreshold: 80 },
+      initial: {
+        rolling: true,
+        weekly: true,
+        monthly: true,
+        showBars: false,
+        showRemaining: false,
+        warnThreshold: 80,
+        burnSpikePct: 20,
+        langOverride: "auto",
+      },
     })
+
+    const lang = (): Locale =>
+      tuiPrefs.langOverride === "en" || tuiPrefs.langOverride === "ru" ? tuiPrefs.langOverride : baseLang
+    const copy = () => COPY[lang()]
 
     const showBars = () => tuiPrefs.showBars === true
     const showRemaining = () => tuiPrefs.showRemaining === true
     const warnAt = () => (typeof tuiPrefs.warnThreshold === "number" ? tuiPrefs.warnThreshold : 80)
+    const spikeAt = () => (typeof tuiPrefs.burnSpikePct === "number" ? tuiPrefs.burnSpikePct : 20)
 
     const [card, setCard] = createSignal<LimitCard | null>(null)
     const [staleError, setStaleError] = createSignal("")
@@ -116,11 +133,35 @@ export default Plugin.define({
     const wasExhausted = new Set<string>()
     const stopCtrl = new AbortController()
     let notifiedVersion = ""
+    let lastSpikeAlertAt = 0
+
+    async function pullSharedPrefs() {
+      try {
+        const shared = (await ctx.client.rpc(Limits).getPrefs({}, { signal: stopCtrl.signal })) as Partial<TuiPrefs>
+        if (!shared || stopCtrl.signal.aborted) return
+        await setTuiPrefs((d) => {
+          if (typeof shared.rolling === "boolean") d.rolling = shared.rolling
+          if (typeof shared.weekly === "boolean") d.weekly = shared.weekly
+          if (typeof shared.monthly === "boolean") d.monthly = shared.monthly
+          if (typeof shared.showRemaining === "boolean") d.showRemaining = shared.showRemaining
+          if (typeof shared.warnThreshold === "number") d.warnThreshold = shared.warnThreshold
+          if (typeof shared.burnSpikePct === "number") d.burnSpikePct = shared.burnSpikePct
+          if (shared.langOverride === "auto" || shared.langOverride === "en" || shared.langOverride === "ru") {
+            d.langOverride = shared.langOverride
+          }
+        })
+      } catch {}
+    }
+
+    function pushSharedPrefs(patch: Partial<TuiPrefs>) {
+      void ctx.client.rpc(Limits).setPrefs(patch, { signal: stopCtrl.signal }).catch(() => {})
+    }
 
     async function refresh(force = false): Promise<LimitCard | null> {
       if (stopCtrl.signal.aborted) return null
       try {
-        const result = (await ctx.client.rpc(Limits).status({ force, lang }, { signal: stopCtrl.signal })) as LimitCard
+        const currentLang = lang()
+        const result = (await ctx.client.rpc(Limits).status({ force, lang: currentLang }, { signal: stopCtrl.signal })) as LimitCard
         if (stopCtrl.signal.aborted) return null
         if (result.ok) {
           setCard(result)
@@ -128,18 +169,28 @@ export default Plugin.define({
           const now = Date.now()
           for (const row of newAlerts(result.rows, notified, warnAt())) {
             ctx.ui.toast.show({
-              message: alertMessage(row, now, lang),
+              message: alertMessage(row, now, currentLang),
               variant: row.used >= 100 ? "error" : "warning",
             })
           }
           for (const row of recoveredAlerts(result.rows, wasExhausted)) {
             ctx.ui.toast.show({
-              message: resetAlertMessage(row, lang),
+              message: resetAlertMessage(row, currentLang),
               variant: "info",
             })
           }
+          if (now - lastSpikeAlertAt > 30 * 60_000) {
+            const spike = detectBurnSpike(result.rows, result.snapshots, spikeAt(), now)
+            if (spike) {
+              lastSpikeAlertAt = now
+              ctx.ui.toast.show({
+                message: burnSpikeMessage(spike, currentLang),
+                variant: "warning",
+              })
+            }
+          }
         } else if (card()?.ok) {
-          setStaleError(result.error || copy.failed)
+          setStaleError(result.error || copy().failed)
         } else {
           setCard(result)
           setStaleError("")
@@ -149,9 +200,9 @@ export default Plugin.define({
         if (stopCtrl.signal.aborted) return null
         log("tui status failed", { error: errorText(error, "en") })
         if (card()?.ok) {
-          setStaleError(copy.noServer)
+          setStaleError(copy().noServer)
         } else {
-          setCard(emptyCard(copy.noServer))
+          setCard(emptyCard(copy().noServer))
         }
         return null
       }
@@ -186,24 +237,26 @@ export default Plugin.define({
           exp?.session?.stats?.({ from: start.getTime() }, { signal: stopCtrl.signal }).catch(() => null),
         ])
         const today = summarizeStatsByProvider(statsRes?.models)
+        const c = copy()
+        const l = lang()
         const parts: string[] = []
-        if (today.goTokens > 0) parts.push(`Go ${formatTokensCompact(today.goTokens)} ${copy.tokUnit}`)
+        if (today.goTokens > 0) parts.push(`Go ${formatTokensCompact(today.goTokens)} ${c.tokUnit}`)
         if (today.zenCostUsd > 0 || today.zenTokens > 0) {
           parts.push(`Zen ${formatUsd(today.zenCostUsd)} (${formatTokensCompact(today.zenTokens)})`)
         }
-        if (parts.length) lines.push(`${copy.todayPrefix}: ${parts.join(" · ")}`)
+        if (parts.length) lines.push(`${c.todayPrefix}: ${parts.join(" · ")}`)
         if (today.topModels.length) {
           const modelsLine = today.topModels
             .map((m) => `${m.modelID} (${formatTokensCompact(m.tokens)})`)
             .join(" · ")
-          lines.push(`${copy.modelsPrefix}: ${modelsLine}`)
+          lines.push(`${c.modelsPrefix}: ${modelsLine}`)
         }
 
         const budgets = Array.isArray(limitsRes?.data?.budgets) ? limitsRes.data.budgets : []
         for (const b of budgets) {
           if (typeof b?.limit === "number" && b.limit > 0 && typeof b?.spent === "number") {
-            const reset = typeof b.resetsAt === "number" && b.resetsAt > 0 ? ` (${span(b.resetsAt - now, lang)})` : ""
-            lines.push(`${copy.budgetPrefix}: ${formatUsd(b.spent)} / ${formatUsd(b.limit)}${reset}`)
+            const reset = typeof b.resetsAt === "number" && b.resetsAt > 0 ? ` (${span(b.resetsAt - now, l)})` : ""
+            lines.push(`${c.budgetPrefix}: ${formatUsd(b.spent)} / ${formatUsd(b.limit)}${reset}`)
           }
         }
       } catch {}
@@ -211,16 +264,17 @@ export default Plugin.define({
     }
 
     async function pickWindows() {
+      const c = copy()
       const picked = await ctx.ui.dialog.select<VisibleWindows>({
-        title: copy.windowsTitle,
+        title: c.windowsTitle,
         options: [
-          { title: copy.allWindows, value: { rolling: true, weekly: true, monthly: true } },
-          { title: copy.win5h1w, value: { rolling: true, weekly: true, monthly: false } },
-          { title: copy.win5h1m, value: { rolling: true, weekly: false, monthly: true } },
-          { title: copy.win1w1m, value: { rolling: false, weekly: true, monthly: true } },
-          { title: copy.only5h, value: { rolling: true, weekly: false, monthly: false } },
-          { title: copy.only1w, value: { rolling: false, weekly: true, monthly: false } },
-          { title: copy.only1m, value: { rolling: false, weekly: false, monthly: true } },
+          { title: c.allWindows, value: { rolling: true, weekly: true, monthly: true } },
+          { title: c.win5h1w, value: { rolling: true, weekly: true, monthly: false } },
+          { title: c.win5h1m, value: { rolling: true, weekly: false, monthly: true } },
+          { title: c.win1w1m, value: { rolling: false, weekly: true, monthly: true } },
+          { title: c.only5h, value: { rolling: true, weekly: false, monthly: false } },
+          { title: c.only1w, value: { rolling: false, weekly: true, monthly: false } },
+          { title: c.only1m, value: { rolling: false, weekly: false, monthly: true } },
         ],
       })
       if (!picked) return
@@ -229,17 +283,20 @@ export default Plugin.define({
         draft.weekly = picked.weekly
         draft.monthly = picked.monthly
       })
+      pushSharedPrefs({ rolling: picked.rolling, weekly: picked.weekly, monthly: picked.monthly })
     }
 
-    void retry(() => refresh(), (result) => result !== null, 5, undefined, stopCtrl.signal)
+    void retry(() => refresh(), (result) => result !== null, 5, undefined, stopCtrl.signal).then(() => {
+      if (!stopCtrl.signal.aborted) void pullSharedPrefs()
+    })
 
     const timer = setInterval(() => void refresh(), 90_000)
 
     const text = () => {
       const current = card()
-      if (!current) return copy.loading
-      const base = formatTuiSidebar(current, tuiPrefs, showBars(), lang, Date.now(), showRemaining())
-      return current.ok && staleError() ? `${base} (${copy.stalePrefix})` : base
+      if (!current) return copy().loading
+      const base = formatTuiSidebar(current, tuiPrefs, showBars(), lang(), Date.now(), showRemaining())
+      return current.ok && (staleError() || current.stale) ? `${base} (${copy().stalePrefix})` : base
     }
 
     const fgColor = () => {
@@ -270,24 +327,26 @@ export default Plugin.define({
 
     let stopChanged: (() => void) | undefined
     let stopUpdated: (() => void) | undefined
+    let stopPrefsChanged: (() => void) | undefined
     try {
       const rpcClient = ctx.client.rpc(Limits) as {
         events?: {
           on?: (
-            name: "changed" | "updated",
+            name: "changed" | "updated" | "prefsChanged",
             fn: (ev: { data?: { version?: string } }) => void,
             opts?: { signal?: AbortSignal },
           ) => () => void
         }
       }
       stopChanged = rpcClient.events?.on?.("changed", () => void refresh(), { signal: stopCtrl.signal })
+      stopPrefsChanged = rpcClient.events?.on?.("prefsChanged", () => void pullSharedPrefs(), { signal: stopCtrl.signal })
       stopUpdated = rpcClient.events?.on?.(
         "updated",
         (ev) => {
           const v = ev?.data?.version
           if (!v || v === notifiedVersion || stopCtrl.signal.aborted) return
           notifiedVersion = v
-          ctx.ui.toast.show({ message: copy.updated(v), variant: "info" })
+          ctx.ui.toast.show({ message: copy().updated(v), variant: "info" })
         },
         { signal: stopCtrl.signal },
       )
@@ -298,16 +357,18 @@ export default Plugin.define({
       commands: [
         {
           id: "opencode-limits-go.show",
-          title: copy.title,
+          title: copy().title,
           bind: "ctrl+shift+l",
           palette: true,
           slash: { name: "limits" },
           run: async () => {
+            const c = copy()
+            const l = lang()
             const result = await refresh(true)
             if (stopCtrl.signal.aborted) return
             if (!result || !result.ok) {
               ctx.ui.toast.show({
-                message: result?.error ?? copy.failed,
+                message: result?.error ?? c.failed,
                 variant: "error",
               })
               return
@@ -316,35 +377,36 @@ export default Plugin.define({
             const extra = await fetchExtraLines(now)
             if (stopCtrl.signal.aborted) return
             if (result.rows.some((r) => r.used >= 100 || r.status === "limited")) {
-              extra.push(copy.fallbackHint)
+              extra.push(c.fallbackHint)
             }
             ctx.ui.dialog.alert({
               title: `OpenCode Go · ${result.org}${result.email ? ` · ${result.email}` : ""}`,
-              message: cardDetail(result, now, lang, extra),
+              message: cardDetail(result, now, l, extra),
             })
           },
         },
         {
           id: "opencode-limits-go.windows",
-          title: copy.windowsTitle,
+          title: copy().windowsTitle,
           palette: true,
           slash: { name: "limits-windows" },
           run: pickWindows,
         },
         {
           id: "opencode-limits-go.tuiSettings",
-          title: copy.settingsTitle,
+          title: copy().settingsTitle,
           palette: true,
           slash: { name: "limits-settings" },
           run: async () => {
+            const c = copy()
             const action = await ctx.ui.dialog.select<string>({
-              title: copy.settingsTitle,
+              title: c.settingsTitle,
               options: [
-                { title: copy.toggleBars(!showBars()), value: "bars" },
-                { title: copy.toggleRemaining(!showRemaining()), value: "remaining" },
-                { title: copy.pickWindows, value: "windows" },
-                { title: copy.thresholdItem(warnAt()), value: "threshold" },
-                { title: copy.checkUpdates, value: "update" },
+                { title: c.toggleBars(!showBars()), value: "bars" },
+                { title: c.toggleRemaining(!showRemaining()), value: "remaining" },
+                { title: c.pickWindows, value: "windows" },
+                { title: c.thresholdItem(warnAt()), value: "threshold" },
+                { title: c.checkUpdates, value: "update" },
               ],
             })
             if (!action || stopCtrl.signal.aborted) return
@@ -353,9 +415,11 @@ export default Plugin.define({
                 d.showBars = !showBars()
               })
             } else if (action === "remaining") {
+              const next = !showRemaining()
               await setTuiPrefs((d) => {
-                d.showRemaining = !showRemaining()
+                d.showRemaining = next
               })
+              pushSharedPrefs({ showRemaining: next })
             } else if (action === "windows") {
               await pickWindows()
             } else if (action === "threshold") {
@@ -363,6 +427,7 @@ export default Plugin.define({
               await setTuiPrefs((d) => {
                 d.warnThreshold = next
               })
+              pushSharedPrefs({ warnThreshold: next })
             } else if (action === "update") {
               try {
                 const res = (await ctx.client.rpc(Limits).updateStatus({ check: true }, { signal: stopCtrl.signal })) as {
@@ -374,15 +439,15 @@ export default Plugin.define({
                 }
                 if (stopCtrl.signal.aborted) return
                 if (res.restartRequired) {
-                  ctx.ui.toast.show({ message: copy.updated(res.latestVersion), variant: "info" })
+                  ctx.ui.toast.show({ message: c.updated(res.latestVersion), variant: "info" })
                   return
                 }
                 if (!res.updateAvailable) {
-                  ctx.ui.toast.show({ message: copy.upToDate(res.currentVersion), variant: "info" })
+                  ctx.ui.toast.show({ message: c.upToDate(res.currentVersion), variant: "info" })
                   return
                 }
                 if (res.managedByPackageManager) {
-                  ctx.ui.toast.show({ message: copy.updateManaged(res.latestVersion), variant: "info" })
+                  ctx.ui.toast.show({ message: c.updateManaged(res.latestVersion), variant: "info" })
                   return
                 }
                 const installed = (await ctx.client.rpc(Limits).installUpdate({}, { signal: stopCtrl.signal })) as {
@@ -393,8 +458,8 @@ export default Plugin.define({
                 if (stopCtrl.signal.aborted) return
                 ctx.ui.toast.show({
                   message: installed.ok
-                    ? copy.updated(installed.version || res.latestVersion)
-                    : copy.updateInstallFailed(installed.error),
+                    ? c.updated(installed.version || res.latestVersion)
+                    : c.updateInstallFailed(installed.error),
                   variant: installed.ok ? "info" : "error",
                 })
               } catch {}
@@ -408,6 +473,7 @@ export default Plugin.define({
       stopCtrl.abort()
       clearInterval(timer)
       stopChanged?.()
+      stopPrefsChanged?.()
       stopUpdated?.()
       stopUsage()
       unslot()
