@@ -16,6 +16,7 @@ import {
   errorText,
   formatError,
   localizeRows,
+  nextResetDelayMs,
   normalizeLocale,
   parseUsage,
   recordUsageSnapshot,
@@ -26,6 +27,7 @@ import { createUpdater } from "./updater.ts"
 
 const TTL = 90_000
 const NEGATIVE_TTL = 25_000
+const MAX_RETRY_AFTER_MS = 5 * 60_000
 const DEADLINE = 25_000
 const HTTP_TIMEOUT = 10_000
 const INITIAL_UPDATE_DELAY_MS = 15_000
@@ -33,6 +35,18 @@ const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000
 const USAGE_EVENT_COOLDOWN_MS = 12_000
 const USAGE_EVENT_DEBOUNCE_MS = 1_500
 const HISTORY_KEY = "history:v1"
+const LAST_GOOD_KEY = "lastGood:v1"
+const SHARED_PREFS_KEY = "sharedPrefs:v1"
+
+type SharedPrefs = {
+  rolling?: boolean
+  weekly?: boolean
+  monthly?: boolean
+  showRemaining?: boolean
+  warnThreshold?: number
+  burnSpikePct?: number
+  langOverride?: string
+}
 
 type CachedRaw =
   | {
@@ -69,7 +83,7 @@ function defaultLocale(): Locale {
   return normalizeLocale(envLang)
 }
 
-function formatCached(entry: CachedRaw, lang: Locale, history: readonly UsageSnapshot[]): LimitCard {
+function formatCached(entry: CachedRaw, lang: Locale, history: readonly UsageSnapshot[], stale = false): LimitCard {
   if (!entry.ok) {
     return emptyCard(formatError(entry.errorCode, entry.errorDetail, lang))
   }
@@ -85,8 +99,25 @@ function formatCached(entry: CachedRaw, lang: Locale, history: readonly UsageSna
     rows,
     tight: tightLine(rows, now, lang),
     error: "",
+    stale,
     snapshots: selectSnapshotsForClient(history, now, 24),
   }
+}
+
+function sanitizeSharedPrefs(raw: unknown): SharedPrefs {
+  if (!raw || typeof raw !== "object") return {}
+  const rec = raw as Record<string, unknown>
+  const out: SharedPrefs = {}
+  if (typeof rec.rolling === "boolean") out.rolling = rec.rolling
+  if (typeof rec.weekly === "boolean") out.weekly = rec.weekly
+  if (typeof rec.monthly === "boolean") out.monthly = rec.monthly
+  if (typeof rec.showRemaining === "boolean") out.showRemaining = rec.showRemaining
+  if (typeof rec.warnThreshold === "number" && Number.isFinite(rec.warnThreshold)) out.warnThreshold = rec.warnThreshold
+  if (typeof rec.burnSpikePct === "number" && Number.isFinite(rec.burnSpikePct)) out.burnSpikePct = rec.burnSpikePct
+  if (rec.langOverride === "auto" || rec.langOverride === "en" || rec.langOverride === "ru") {
+    out.langOverride = rec.langOverride
+  }
+  return out
 }
 
 export default Plugin.define({
@@ -99,9 +130,41 @@ export default Plugin.define({
     })
     const stopEvents = new AbortController()
     let cache: CachedRaw | null = null
+    let diskCache: (CachedRaw & { ok: true }) | null = null
     let inflight: { epoch: number; promise: Promise<CachedRaw> } | null = null
+    let resetTimer: ReturnType<typeof setTimeout> | null = null
     let epoch = 0
-    let rpcRef: { events: { emit: (name: "changed" | "updated", data: any) => Promise<void> } } | null = null
+    let rpcRef: { events: { emit: (name: "changed" | "updated" | "prefsChanged", data: any) => Promise<void> } } | null =
+      null
+
+    const savedDisk = await ctx.storage.get(LAST_GOOD_KEY).catch(() => undefined)
+    if (savedDisk && typeof savedDisk === "object" && (savedDisk as { ok?: unknown }).ok === true) {
+      const candidate = savedDisk as CachedRaw & { ok: true }
+      if (Array.isArray(candidate.rows) && candidate.rows.length > 0) {
+        diskCache = candidate
+      }
+    }
+
+    const savedPrefs = sanitizeSharedPrefs(await ctx.storage.get(SHARED_PREFS_KEY).catch(() => undefined))
+    const optPrefs = sanitizeSharedPrefs(ctx.options)
+    let sharedPrefs: SharedPrefs = { ...optPrefs, ...savedPrefs }
+
+    function scheduleResetTimer(rows: readonly LimitRow[]) {
+      if (resetTimer) {
+        clearTimeout(resetTimer)
+        resetTimer = null
+      }
+      if (stopEvents.signal.aborted) return
+      const delay = nextResetDelayMs(rows, Date.now())
+      if (delay === null) return
+      resetTimer = setTimeout(() => {
+        resetTimer = null
+        if (stopEvents.signal.aborted) return
+        cache = null
+        void rpcRef?.events.emit("changed", {}).catch(() => {})
+      }, delay)
+      resetTimer.unref?.()
+    }
 
     const savedHistory = await ctx.storage.get(HISTORY_KEY).catch(() => undefined)
     let historyAccount = ""
@@ -196,12 +259,14 @@ export default Plugin.define({
       if (!foundAny) {
         return { ok: false, errorCode: "NO_TOKEN", at: Date.now(), ttl: NEGATIVE_TTL }
       }
+      const retryAfterMs = lastError instanceof HttpError && lastError.retryAfterMs ? lastError.retryAfterMs : 0
+      const negTtl = retryAfterMs > 0 ? Math.min(Math.max(retryAfterMs, NEGATIVE_TTL), MAX_RETRY_AFTER_MS) : NEGATIVE_TTL
       return {
         ok: false,
         errorCode: "FETCH_FAILED",
         errorDetail: errorText(lastError ?? "", "en"),
         at: Date.now(),
-        ttl: NEGATIVE_TTL,
+        ttl: negTtl,
       }
     }
 
@@ -216,10 +281,11 @@ export default Plugin.define({
 
       const effectiveTtl = cache ? (requestedMaxAge ? Math.min(cache.ttl, requestedMaxAge) : cache.ttl) : 0
       if (!force && cache && Date.now() - cache.at < effectiveTtl) {
-        return formatCached(cache, lang, history)
+        return formatCached(cache, lang, history, false)
       }
 
-      if (!inflight || inflight.epoch !== epoch) {
+      const startInflight = () => {
+        if (inflight && inflight.epoch === epoch) return inflight.promise
         const runEpoch = epoch
         const promise = (async (): Promise<CachedRaw> => {
           const next = await load()
@@ -228,6 +294,9 @@ export default Plugin.define({
             cache = next
           }
           if (next.ok) {
+            diskCache = next
+            scheduleResetTimer(next.rows)
+            void ctx.storage.set(LAST_GOOD_KEY, next as unknown as any).catch(() => {})
             const acct = accountKey(next.org, next.email, next.source)
             const baseHistory = historyAccount && historyAccount !== acct ? [] : history
             const nextHistory = recordUsageSnapshot(baseHistory, next.rows, next.checkedAtMs)
@@ -248,10 +317,35 @@ export default Plugin.define({
           if (inflight?.promise === promise) inflight = null
         })
         inflight = { epoch: runEpoch, promise }
+        return promise
       }
 
-      const raw = await inflight.promise
-      return formatCached(raw, lang, history)
+      // Instant cold start: return last persisted good card while refreshing in background.
+      if (!force && !cache && diskCache) {
+        void startInflight().then((next) => {
+          if (next.ok && !stopEvents.signal.aborted) {
+            void rpcRef?.events.emit("changed", {}).catch(() => {})
+          }
+        })
+        return formatCached(diskCache, lang, history, true)
+      }
+
+      const raw = await startInflight()
+      return formatCached(raw, lang, history, false)
+    }
+
+    async function getPrefs(): Promise<SharedPrefs> {
+      return { ...sharedPrefs }
+    }
+
+    async function setPrefs(input: unknown): Promise<SharedPrefs> {
+      const patch = sanitizeSharedPrefs(input)
+      if (Object.keys(patch).length > 0) {
+        sharedPrefs = { ...sharedPrefs, ...patch }
+        await ctx.storage.set(SHARED_PREFS_KEY, sharedPrefs as unknown as any).catch(() => {})
+        void rpcRef?.events.emit("prefsChanged", {}).catch(() => {})
+      }
+      return { ...sharedPrefs }
     }
 
     async function updateStatus(input: unknown) {
@@ -277,6 +371,8 @@ export default Plugin.define({
 
     const rpc = await ctx.rpc.register(Limits, {
       status,
+      getPrefs,
+      setPrefs,
       updateStatus,
       installUpdate,
       setUpdateConfig,
@@ -346,6 +442,7 @@ export default Plugin.define({
       clearTimeout(startupTimer)
       clearInterval(periodicTimer)
       if (usageDebounce) clearTimeout(usageDebounce)
+      if (resetTimer) clearTimeout(resetTimer)
       stopEvents.abort()
     }
   },

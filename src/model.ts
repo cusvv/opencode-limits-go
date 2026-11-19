@@ -30,6 +30,7 @@ export type LimitCard = {
   rows: LimitRow[]
   tight: string
   error: string
+  stale?: boolean
   snapshots?: UsageSnapshot[]
 }
 
@@ -74,6 +75,8 @@ export function windowLabel(row: Pick<LimitRow, "key" | "label">, lang: Locale =
 }
 
 export type VisibleWindows = Record<WindowKey, boolean>
+export type StripMode = "selected" | "tightest"
+export type TimeFormat = "24h" | "12h"
 
 export function filterStripRows(rows: readonly LimitRow[], visible: VisibleWindows): LimitRow[] {
   if (!rows.length) return []
@@ -82,6 +85,29 @@ export function filterStripRows(rows: readonly LimitRow[], visible: VisibleWindo
     return key ? visible[key] : true
   })
   return filtered.length ? filtered : [...rows]
+}
+
+export function selectStripRows(
+  rows: readonly LimitRow[],
+  visible: VisibleWindows,
+  mode: StripMode = "selected",
+): LimitRow[] {
+  if (!rows.length) return []
+  if (mode === "tightest") {
+    const sorted = [...rows].sort((a, b) => {
+      if (b.used !== a.used) return b.used - a.used
+      const ra = a.resetsAtMs && a.resetsAtMs > 0 ? a.resetsAtMs : Number.MAX_SAFE_INTEGER
+      const rb = b.resetsAtMs && b.resetsAtMs > 0 ? b.resetsAtMs : Number.MAX_SAFE_INTEGER
+      return ra - rb
+    })
+    return [sorted[0]]
+  }
+  return filterStripRows(rows, visible)
+}
+
+export function shouldHideStrip(rows: readonly LimitRow[], autoHideBelow = 0): boolean {
+  if (autoHideBelow <= 0 || !rows.length) return false
+  return rows.every((r) => r.used < autoHideBelow && r.status !== "limited")
 }
 
 export function formatError(code: ErrorCode | undefined, detail: string | undefined, lang: Locale = "en"): string {
@@ -109,10 +135,17 @@ export function formatError(code: ErrorCode | undefined, detail: string | undefi
 
 const pad = (n: number) => String(n).padStart(2, "0")
 
-export function shortDate(isoOrMs: string | number): string {
+export function shortDate(isoOrMs: string | number, timeFormat: TimeFormat = "24h"): string {
   const d = new Date(isoOrMs)
   if (Number.isNaN(d.getTime())) return "?"
-  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  const date = `${pad(d.getDate())}.${pad(d.getMonth() + 1)}`
+  if (timeFormat === "12h") {
+    const h24 = d.getHours()
+    const suffix = h24 >= 12 ? "PM" : "AM"
+    const h12 = h24 % 12 || 12
+    return `${date} ${h12}:${pad(d.getMinutes())} ${suffix}`
+  }
+  return `${date} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 export function span(ms: number, lang: Locale = "en"): string {
@@ -323,6 +356,104 @@ export function relativeAge(checkedAtMs: number | undefined, now = Date.now(), l
 export function accountKey(org: string, email: string, source: string): string {
   const norm = (s: string) => s.trim().toLowerCase()
   return `${norm(org)}|${norm(email)}|${norm(source)}`
+}
+
+export function nextResetDelayMs(rows: readonly LimitRow[], now = Date.now(), maxLookaheadMs = 6 * 3_600_000): number | null {
+  let earliest = Number.POSITIVE_INFINITY
+  for (const row of rows) {
+    const at = row.resetsAtMs ?? 0
+    if (at > now) {
+      const delay = at - now + 3_000
+      if (delay <= maxLookaheadMs && delay < earliest) {
+        earliest = delay
+      }
+    }
+  }
+  return Number.isFinite(earliest) ? Math.max(3_000, Math.round(earliest)) : null
+}
+
+export type BurnSpike = {
+  row: LimitRow
+  delta: number
+  spanMs: number
+}
+
+export function detectBurnSpike(
+  rows: readonly LimitRow[],
+  snapshots: readonly UsageSnapshot[] | undefined,
+  thresholdPct = 20,
+  now = Date.now(),
+): BurnSpike | null {
+  if (thresholdPct <= 0 || !snapshots?.length) return null
+  const row = rows.find((r) => rowWindowKey(r) === "rolling")
+  if (!row || row.used < thresholdPct || row.used >= 100) return null
+  const minAgeMs = 5 * 60_000
+  const maxAgeMs = 30 * 60_000
+  let best: { delta: number; spanMs: number } | null = null
+  for (const snap of snapshots) {
+    const val = snap.rolling
+    if (typeof val !== "number") continue
+    const ageMs = now - snap.at
+    if (ageMs < minAgeMs || ageMs > maxAgeMs) continue
+    const delta = row.used - val
+    if (delta >= thresholdPct && (!best || delta > best.delta)) {
+      best = { delta, spanMs: ageMs }
+    }
+  }
+  return best ? { row, delta: best.delta, spanMs: best.spanMs } : null
+}
+
+export function burnSpikeMessage(spike: BurnSpike, lang: Locale = "en"): string {
+  const lbl = windowLabel(spike.row, lang)
+  const duration = span(spike.spanMs, lang)
+  return lang === "ru"
+    ? `Быстрый расход ${lbl}: +${Math.round(spike.delta)}% за ${duration}`
+    : `Fast burn on ${lbl}: +${Math.round(spike.delta)}% in ${duration}`
+}
+
+export type SparklineData = {
+  polyline: string
+  area: string
+  min: number
+  max: number
+  count: number
+}
+
+export function buildSparklinePoints(
+  snapshots: readonly UsageSnapshot[] | undefined,
+  key: WindowKey = "rolling",
+  width = 240,
+  height = 28,
+): SparklineData | null {
+  if (!snapshots?.length) return null
+  const pts = snapshots
+    .map((s) => ({ at: s.at, v: s[key] }))
+    .filter((p): p is { at: number; v: number } => typeof p.v === "number" && Number.isFinite(p.v))
+    .sort((a, b) => a.at - b.at)
+  if (pts.length < 3) return null
+
+  const minAt = pts[0].at
+  const maxAt = pts[pts.length - 1].at
+  const timeSpan = Math.max(1, maxAt - minAt)
+  let minV = 100
+  let maxV = 0
+  for (const p of pts) {
+    if (p.v < minV) minV = p.v
+    if (p.v > maxV) maxV = p.v
+  }
+  const padY = 3
+  const usableH = Math.max(4, height - padY * 2)
+  const rangeV = Math.max(10, maxV - minV)
+  const baseV = Math.max(0, Math.min(minV, maxV - rangeV))
+
+  const coords = pts.map((p) => {
+    const x = Math.round(((p.at - minAt) / timeSpan) * width * 10) / 10
+    const y = Math.round((height - padY - ((p.v - baseV) / rangeV) * usableH) * 10) / 10
+    return `${x},${y}`
+  })
+  const polyline = coords.join(" ")
+  const area = `0,${height} ${polyline} ${width},${height}`
+  return { polyline, area, min: minV, max: maxV, count: pts.length }
 }
 
 export function redactSecrets(text: string): string {

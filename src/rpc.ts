@@ -51,9 +51,54 @@ export const Limits = Rpc.define({
           rows: { type: "array", items: rowSchema },
           tight: { type: "string" },
           error: { type: "string" },
+          stale: { type: "boolean" },
           snapshots: { type: "array", items: snapshotSchema },
         },
         required: ["ok", "org", "email", "checkedAt", "source", "rows", "tight", "error"],
+      } as const,
+    },
+    getPrefs: {
+      input: {
+        type: "object",
+        properties: {},
+      } as const,
+      output: {
+        type: "object",
+        properties: {
+          rolling: { type: "boolean" },
+          weekly: { type: "boolean" },
+          monthly: { type: "boolean" },
+          showRemaining: { type: "boolean" },
+          warnThreshold: { type: "number" },
+          burnSpikePct: { type: "number" },
+          langOverride: { type: "string" },
+        },
+      } as const,
+    },
+    setPrefs: {
+      input: {
+        type: "object",
+        properties: {
+          rolling: { type: "boolean" },
+          weekly: { type: "boolean" },
+          monthly: { type: "boolean" },
+          showRemaining: { type: "boolean" },
+          warnThreshold: { type: "number" },
+          burnSpikePct: { type: "number" },
+          langOverride: { type: "string" },
+        },
+      } as const,
+      output: {
+        type: "object",
+        properties: {
+          rolling: { type: "boolean" },
+          weekly: { type: "boolean" },
+          monthly: { type: "boolean" },
+          showRemaining: { type: "boolean" },
+          warnThreshold: { type: "number" },
+          burnSpikePct: { type: "number" },
+          langOverride: { type: "string" },
+        },
       } as const,
     },
     updateStatus: {
@@ -136,6 +181,12 @@ export const Limits = Rpc.define({
           version: { type: "string" },
         },
         required: ["version"],
+      } as const,
+    },
+    prefsChanged: {
+      schema: {
+        type: "object",
+        properties: {},
       } as const,
     },
   },

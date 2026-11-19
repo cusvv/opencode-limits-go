@@ -491,3 +491,50 @@ test("summarizeStatsByProvider extracts topModels and formatTuiSidebar shows rem
   const remainingText = formatTuiSidebar(card, { rolling: true, weekly: true, monthly: false }, false, "en", now, true)
   assert.equal(remainingText, "5h 0% (42m) · 1w 70%")
 })
+
+test("selectStripRows tightest mode, shouldHideStrip, 12h shortDate, nextResetDelayMs, detectBurnSpike, and buildSparklinePoints", async () => {
+  const {
+    buildSparklinePoints,
+    burnSpikeMessage,
+    detectBurnSpike,
+    nextResetDelayMs,
+    selectStripRows,
+    shortDate,
+    shouldHideStrip,
+  } = await import("./model.ts")
+
+  const now = Date.parse("2026-11-19T15:30:00Z")
+  const rows = [
+    { key: "rolling" as const, label: "5h", used: 35, status: "ok", resetsAt: "", resetsAtMs: now + 2 * 3_600_000, resetsIn: "2h" },
+    { key: "weekly" as const, label: "1w", used: 62, status: "ok", resetsAt: "", resetsAtMs: now + 3 * 86_400_000, resetsIn: "3d" },
+    { key: "monthly" as const, label: "1m", used: 62, status: "ok", resetsAt: "", resetsAtMs: now + 10 * 86_400_000, resetsIn: "10d" },
+  ]
+  const tightest = selectStripRows(rows, { rolling: true, weekly: true, monthly: true }, "tightest")
+  assert.equal(tightest.length, 1)
+  assert.equal(tightest[0].key, "weekly")
+
+  assert.equal(shouldHideStrip(rows, 0), false)
+  assert.equal(shouldHideStrip(rows, 70), true)
+  assert.equal(shouldHideStrip(rows, 50), false)
+
+  assert.match(shortDate(now, "12h"), /\d{2}\.\d{2} \d{1,2}:\d{2} (?:AM|PM)/)
+  assert.equal(nextResetDelayMs(rows, now), 2 * 3_600_000 + 3_000)
+
+  const snaps = [
+    { at: now - 20 * 60_000, rolling: 10 },
+    { at: now - 10 * 60_000, rolling: 22 },
+    { at: now - 1 * 60_000, rolling: 35 },
+  ]
+  const spike = detectBurnSpike(rows, snaps, 20, now)
+  assert.ok(spike !== null)
+  assert.equal(spike.delta, 25)
+  assert.match(burnSpikeMessage(spike, "en"), /Fast burn on 5h: \+25%/)
+  assert.match(burnSpikeMessage(spike, "ru"), /Быстрый расход 5ч: \+25%/)
+
+  const spark = buildSparklinePoints(snaps, "rolling", 200, 24)
+  assert.ok(spark !== null)
+  assert.equal(spark.min, 10)
+  assert.equal(spark.max, 35)
+  assert.equal(spark.count, 3)
+  assert.ok(spark.polyline.includes(","))
+})
