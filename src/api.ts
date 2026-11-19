@@ -6,13 +6,30 @@ export class HttpError extends Error {
   readonly status: number
   readonly detail?: string
   readonly retryable: boolean
+  readonly retryAfterMs?: number
 
-  constructor(status: number, detail?: string) {
+  constructor(status: number, detail?: string, retryAfterMs?: number) {
     super(detail ? `HTTP ${status}: ${detail}` : `HTTP ${status}`)
     this.status = status
     this.detail = detail
     this.retryable = status === 429 || status >= 500
+    this.retryAfterMs = retryAfterMs
   }
+}
+
+export function parseRetryAfterMs(header: string | null, now = Date.now()): number | undefined {
+  if (!header) return undefined
+  const trimmed = header.trim()
+  if (!trimmed) return undefined
+  if (/^\d+$/.test(trimmed)) {
+    const secs = Number(trimmed)
+    return Number.isFinite(secs) && secs > 0 ? secs * 1000 : undefined
+  }
+  const dateMs = Date.parse(trimmed)
+  if (Number.isFinite(dateMs) && dateMs > now) {
+    return dateMs - now
+  }
+  return undefined
 }
 
 async function readErrorDetail(res: Response): Promise<string | undefined> {
@@ -66,7 +83,8 @@ export async function fetchUsageOnce(access: string, timeoutMs = 10_000, parentS
   })
   if (!res.ok) {
     const detail = await readErrorDetail(res)
-    throw new HttpError(res.status, detail)
+    const retryAfterMs = res.status === 429 || res.status === 503 ? parseRetryAfterMs(res.headers.get("retry-after")) : undefined
+    throw new HttpError(res.status, detail, retryAfterMs)
   }
   try {
     return await res.json()
@@ -85,9 +103,12 @@ export async function fetchUsage(access: string, timeoutMs = 10_000, parentSigna
       return await fetchUsageOnce(access, Math.min(timeoutMs, remaining), parentSignal)
     } catch (error) {
       lastError = error
-      if (attempt === 0 && !parentSignal?.aborted && isRetryableFetchError(error) && deadline - Date.now() > 1500) {
-        await pause(600, parentSignal)
-        continue
+      if (attempt === 0 && !parentSignal?.aborted && isRetryableFetchError(error)) {
+        const waitMs = error instanceof HttpError && error.retryAfterMs ? error.retryAfterMs : 600
+        if (deadline - Date.now() > waitMs + 900) {
+          await pause(waitMs, parentSignal)
+          continue
+        }
       }
       throw error
     }

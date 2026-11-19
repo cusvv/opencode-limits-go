@@ -75,3 +75,30 @@ test("fetchUsage ignores HTML error pages and throws INVALID_JSON on malformed 2
     globalThis.fetch = origFetch
   }
 })
+
+test("parseRetryAfterMs handles seconds and HTTP dates, and fetchUsage respects long Retry-After without retrying", async () => {
+  const { parseRetryAfterMs } = await import("./api.ts")
+  const now = Date.parse("2026-11-19T12:00:00Z")
+  assert.equal(parseRetryAfterMs("45", now), 45_000)
+  assert.equal(parseRetryAfterMs("Thu, 19 Nov 2026 12:01:00 GMT", now), 60_000)
+  assert.equal(parseRetryAfterMs("invalid", now), undefined)
+
+  const origFetch = globalThis.fetch
+  let calls = 0
+  globalThis.fetch = (async () => {
+    calls += 1
+    return new Response(JSON.stringify({ error: "rate limited" }), {
+      status: 429,
+      headers: { "Retry-After": "120" },
+    })
+  }) as typeof fetch
+  try {
+    await assert.rejects(
+      () => fetchUsage("tok_123", 3000),
+      (err: unknown) => err instanceof HttpError && err.status === 429 && err.retryAfterMs === 120_000,
+    )
+    assert.equal(calls, 1)
+  } finally {
+    globalThis.fetch = origFetch
+  }
+})
