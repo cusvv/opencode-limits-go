@@ -45,6 +45,7 @@ type TuiAlertState = {
   notified: Record<string, number>
   exhausted: string[]
   risk: Record<string, string>
+  spikeAt: number
 }
 
 export default Plugin.define({
@@ -72,7 +73,7 @@ export default Plugin.define({
       },
     })
     const [alertState, setAlertState] = ctx.storage.store<TuiAlertState>("opencode-limits-go.tui.alerts", {
-      initial: { account: "", notified: {}, exhausted: [], risk: {} },
+      initial: { account: "", notified: {}, exhausted: [], risk: {}, spikeAt: 0 },
     })
 
     const lang = (): Locale =>
@@ -89,7 +90,6 @@ export default Plugin.define({
     const [staleError, setStaleError] = createSignal("")
     const stopCtrl = new AbortController()
     let notifiedVersion = ""
-    let lastSpikeAlertAt = 0
     let refreshing = false
 
     function notify(message: string, variant: "info" | "warning" | "error"): void {
@@ -137,7 +137,7 @@ export default Plugin.define({
       const notified = new Map<string, number>(changedAccount ? [] : Object.entries(alertState.notified))
       const wasExhausted = new Set<string>(changedAccount ? [] : alertState.exhausted)
       const risk = { ...(changedAccount ? {} : alertState.risk) }
-      if (changedAccount) lastSpikeAlertAt = 0
+      let lastSpikeAlertAt = changedAccount ? 0 : alertState.spikeAt
 
       const triggered = newAlerts(result.rows, notified, warnAt())
       const recovered = recoveredAlerts(result.rows, wasExhausted)
@@ -167,6 +167,7 @@ export default Plugin.define({
         notified: Object.fromEntries(notified),
         exhausted: [...wasExhausted],
         risk,
+        spikeAt: lastSpikeAlertAt,
       }
       if (JSON.stringify(nextState) !== JSON.stringify(alertState)) {
         void setAlertState((draft) => {
@@ -174,6 +175,7 @@ export default Plugin.define({
           draft.notified = nextState.notified
           draft.exhausted = nextState.exhausted
           draft.risk = nextState.risk
+          draft.spikeAt = nextState.spikeAt
         })
       }
     }
@@ -451,7 +453,14 @@ export default Plugin.define({
               if (cached?.ok) {
                 ctx.ui.dialog.alert({
                   title: `OpenCode Go · ${cached.org}${cached.email ? ` · ${cached.email}` : ""}`,
-                  message: cardDetail(cached, now, l, [result?.error ?? c.failed], showRemaining()),
+                  message: cardDetail(
+                    cached,
+                    now,
+                    l,
+                    [result?.error ?? c.failed],
+                    showRemaining(),
+                    (ctx.renderer?.terminalWidth ?? 80) < 76,
+                  ),
                 })
                 return
               }
@@ -465,7 +474,14 @@ export default Plugin.define({
             }
             ctx.ui.dialog.alert({
               title: `OpenCode Go · ${result.org}${result.email ? ` · ${result.email}` : ""}`,
-              message: cardDetail(result, now, l, extra, showRemaining()),
+              message: cardDetail(
+                result,
+                now,
+                l,
+                extra,
+                showRemaining(),
+                (ctx.renderer?.terminalWidth ?? 80) < 76,
+              ),
             })
           },
         },

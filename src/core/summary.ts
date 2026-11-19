@@ -42,6 +42,7 @@ export function cardDetail(
   lang: Locale = "en",
   extraLines: readonly string[] = [],
   showRemaining = false,
+  narrow = false,
 ): string {
   const source = sourceLabel(card.source, lang)
   const checkedPrefix = lang === "ru" ? "Проверено" : "Checked"
@@ -49,14 +50,21 @@ export function cardDetail(
   const rows = card.rows.map((row) => {
     const label = windowLabel(row, lang)
     const { passed, text } = resetText(row.resetsAtMs, row.resetsIn, now, lang)
-    const resetPart = passed
-      ? `${row.resetsAt} (${text})`
-      : lang === "ru"
-        ? `${row.resetsAt} (через ${text})`
-        : `${row.resetsAt} (in ${text})`
+    const resetPart = narrow
+      ? passed
+        ? text
+        : lang === "ru"
+          ? `через ${text}`
+          : `in ${text}`
+      : passed
+        ? `${row.resetsAt} (${text})`
+        : lang === "ru"
+          ? `${row.resetsAt} (через ${text})`
+          : `${row.resetsAt} (in ${text})`
     const deltaPart = row.delta1h && row.delta1h > 0 ? `  +${row.delta1h}%` : ""
     const statusPart = row.status !== "ok" ? `  [${row.status}]` : ""
-    return `${label.padStart(4)}: ${String(displayPercent(row.used, showRemaining)).padStart(3)}%  ${bar(displayPercent(row.used, showRemaining))}  ${resetPart}${deltaPart}${statusPart}`
+    const width = narrow ? 10 : 20
+    return `${label.padStart(4)}: ${String(displayPercent(row.used, showRemaining)).padStart(3)}%  ${bar(displayPercent(row.used, showRemaining), width)}  ${resetPart}${deltaPart}${statusPart}`
   })
   const tightLineStr = tightLine(card.rows, now, lang)
   const pace = paceSummary(card.rows, now, lang, card.snapshots)

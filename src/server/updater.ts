@@ -194,6 +194,7 @@ async function acquireUpdateLock(root: string): Promise<() => Promise<void>> {
 
 async function assertExtractedSize(dir: string, total = { bytes: 0 }): Promise<number> {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) throw new Error("Extracted archive contains a symbolic link")
     const full = path.join(dir, entry.name)
     if (entry.isDirectory()) {
       await assertExtractedSize(full, total)
@@ -337,6 +338,12 @@ export function createUpdater(deps: UpdaterDeps = {}) {
       signal: AbortSignal.timeout(10_000),
     })
     if (res.status === 404) return null
+    if (res.status === 403 || res.status === 429) {
+      const reset = Number(res.headers.get("x-ratelimit-reset") || "0")
+      const wait = reset > 0 ? Math.max(0, reset * 1000 - Date.now()) : 0
+      const hint = wait > 0 ? `; retry in ${Math.ceil(wait / 60_000)}m` : ""
+      throw new Error(`GitHub API rate limited (HTTP ${res.status})${hint}`)
+    }
     if (!res.ok) throw new Error(`GitHub API HTTP ${res.status}`)
     return (await res.json()) as GitHubRelease
   }
@@ -455,7 +462,8 @@ export function createUpdater(deps: UpdaterDeps = {}) {
     const effectiveCurrent = installedVersion ?? runningVersion
     const now = nowFn()
 
-    if (!opts.force && lastStatus && now - lastStatus.checkedAtMs < CHECK_TTL_MS) {
+    // Never cache a failed check for six hours: a temporary 403/429 must retry.
+    if (!opts.force && lastStatus && !lastStatus.error && now - lastStatus.checkedAtMs < CHECK_TTL_MS) {
       if (!opts.autoInstall || !lastStatus.updateAvailable || installedVersion) {
         return lastStatus
       }
