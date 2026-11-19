@@ -192,6 +192,18 @@ async function acquireUpdateLock(root: string): Promise<() => Promise<void>> {
   }
 }
 
+async function missingRuntimeDeps(dir: string): Promise<string[]> {
+  try {
+    const raw = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8")) as {
+      dependencies?: Record<string, unknown>
+    }
+    const deps = Object.keys(raw.dependencies ?? {})
+    return deps.filter((dep) => !existsSync(path.join(dir, "node_modules", ...dep.split("/"), "package.json")))
+  } catch {
+    return []
+  }
+}
+
 async function assertExtractedSize(dir: string, total = { bytes: 0 }): Promise<number> {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     if (entry.isSymbolicLink()) throw new Error("Extracted archive contains a symbolic link")
@@ -287,6 +299,37 @@ async function syncSourceTree(srcDir: string, destDir: string): Promise<void> {
     } else if (entry.isFile() && /\.(?:ts|tsx)$/.test(entry.name)) {
       await rm(destPath, { force: true })
     }
+  }
+}
+
+async function backupPlugin(destRoot: string, backupRoot: string): Promise<void> {
+  await mkdir(backupRoot, { recursive: true })
+  for (const rel of TOP_LEVEL_FILES) {
+    const src = path.join(destRoot, rel)
+    if (await exists(src)) await cp(src, path.join(backupRoot, rel), { force: true })
+  }
+  if (await exists(path.join(destRoot, "src"))) {
+    await cp(path.join(destRoot, "src"), path.join(backupRoot, "src"), { recursive: true, force: true })
+  }
+  const gui = path.join(destRoot, "dist", "gui-experimental.cjs")
+  if (await exists(gui)) {
+    await mkdir(path.join(backupRoot, "dist"), { recursive: true })
+    await cp(gui, path.join(backupRoot, "dist", "gui-experimental.cjs"), { force: true })
+  }
+}
+
+async function restorePlugin(backupRoot: string, destRoot: string): Promise<void> {
+  for (const rel of TOP_LEVEL_FILES) {
+    const src = path.join(backupRoot, rel)
+    if (await exists(src)) await cp(src, path.join(destRoot, rel), { force: true })
+  }
+  if (await exists(path.join(backupRoot, "src"))) {
+    await cp(path.join(backupRoot, "src"), path.join(destRoot, "src"), { recursive: true, force: true })
+  }
+  const gui = path.join(backupRoot, "dist", "gui-experimental.cjs")
+  if (await exists(gui)) {
+    await mkdir(path.join(destRoot, "dist"), { recursive: true })
+    await cp(gui, path.join(destRoot, "dist", "gui-experimental.cjs"), { force: true })
   }
 }
 
@@ -431,14 +474,31 @@ export function createUpdater(deps: UpdaterDeps = {}) {
         }
         const targetVersion = pkg.version
 
-        await copyVerifiedPlugin(verifiedRoot, pluginRoot)
-        const installed = await readPackageVersion(pluginRoot)
-        if (!installed || installed.version !== targetVersion) throw new Error("Installed files did not verify after copy")
+        const backupDir = path.join(tmpBase, "backup")
+        await backupPlugin(pluginRoot, backupDir)
+        try {
+          await copyVerifiedPlugin(verifiedRoot, pluginRoot)
+          const installed = await readPackageVersion(pluginRoot)
+          if (!installed || installed.version !== targetVersion) {
+            throw new Error("Installed files did not verify after copy")
+          }
+        } catch (error) {
+          await restorePlugin(backupDir, pluginRoot).catch((restoreError) => {
+            log("plugin rollback failed", { error: errorText(restoreError) })
+          })
+          throw error
+        }
         installedVersion = targetVersion
         deps.onInstalled?.(targetVersion)
         log("plugin auto-updated", { version: targetVersion })
-
-        return { ok: true, version: targetVersion, restartRequired: true, error: "" }
+        const missingDeps = await missingRuntimeDeps(pluginRoot)
+        if (missingDeps.length) log("update installed; missing runtime dependencies", { missing: missingDeps })
+        return {
+          ok: true,
+          version: targetVersion,
+          restartRequired: true,
+          error: missingDeps.length ? `Run npm install: ${missingDeps.join(", ")}` : "",
+        }
       } catch (error) {
         const msg = errorText(error)
         log("plugin update failed", { error: msg })

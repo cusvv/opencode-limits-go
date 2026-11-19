@@ -227,7 +227,8 @@ export function LimitsStrip(props: {
               }
               return props.preview && row.resetsIn ? row.resetsIn : ""
             }
-            const resetColor = () => (row.used >= 100 || row.status === "limited" ? "#ef4444" : "inherit")
+            const resetColor = () =>
+              row.used >= 100 || row.status === "limited" ? (props.light ? "#dc2626" : "#ef4444") : "inherit"
             return (
               <span style="display:inline-flex;align-items:center;gap:5px;">
                 <Show when={props.showLabels}>

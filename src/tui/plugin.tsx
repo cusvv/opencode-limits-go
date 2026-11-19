@@ -341,6 +341,7 @@ export default Plugin.define({
           installed.ok ? c.updated(installed.version || res.latestVersion) : c.updateInstallFailed(installed.error),
           installed.ok ? "info" : "error",
         )
+        if (installed.ok && installed.error) notify(c.updateInstallFailed(installed.error), "warning")
       } catch {}
     }
 

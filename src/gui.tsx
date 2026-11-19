@@ -612,6 +612,9 @@ export default Plugin.define({
           return
         }
         if (res.restartRequired) notifyUpdated(res.version)
+        if (res.error) {
+          ctx.toast.show({ variant: "error", title: t("settings.update.failedToast", { error: res.error }) })
+        }
         await checkUpdates(false)
       } catch (error) {
         if (!ctx.signal.aborted) {
@@ -1581,7 +1584,7 @@ export default Plugin.define({
         const paceCardStyle = () => {
           const k = pace()?.kind
           if (k === "exhausted") {
-            return "font-size:11px;padding:7px 10px;border-radius:8px;border:1px solid rgba(239,68,68,.35);background:rgba(239,68,68,.08);color:#ef4444;"
+            return `font-size:11px;padding:7px 10px;border-radius:8px;border:1px solid rgba(239,68,68,.35);background:rgba(239,68,68,.08);color:${light() ? "#dc2626" : "#ef4444"};`
           }
           if (k === "hot") {
             return `font-size:11px;padding:7px 10px;border-radius:8px;border:1px solid rgba(245,158,11,.35);background:rgba(245,158,11,.08);color:${amberText(light())};`
