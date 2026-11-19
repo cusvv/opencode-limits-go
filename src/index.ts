@@ -43,6 +43,7 @@ type SharedPrefs = {
   weekly?: boolean
   monthly?: boolean
   showRemaining?: boolean
+  alerts?: boolean
   warnThreshold?: number
   burnSpikePct?: number
   langOverride?: string
@@ -149,6 +150,7 @@ function sanitizeSharedPrefs(raw: unknown): SharedPrefs {
   if (typeof rec.weekly === "boolean") out.weekly = rec.weekly
   if (typeof rec.monthly === "boolean") out.monthly = rec.monthly
   if (typeof rec.showRemaining === "boolean") out.showRemaining = rec.showRemaining
+  if (typeof rec.alerts === "boolean") out.alerts = rec.alerts
   if (typeof rec.warnThreshold === "number" && Number.isFinite(rec.warnThreshold)) out.warnThreshold = rec.warnThreshold
   if (typeof rec.burnSpikePct === "number" && Number.isFinite(rec.burnSpikePct)) out.burnSpikePct = rec.burnSpikePct
   if (rec.langOverride === "auto" || rec.langOverride === "en" || rec.langOverride === "ru") {
