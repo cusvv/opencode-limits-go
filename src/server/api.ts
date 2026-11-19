@@ -1,4 +1,4 @@
-import { CodedError } from "../core/index.ts"
+import { CodedError, redactSecrets } from "../core/index.ts"
 
 const ENDPOINT = "https://opencode.ai/zen/go/v1/usage"
 
@@ -44,9 +44,9 @@ async function readErrorDetail(res: Response): Promise<string | undefined> {
           : undefined) ??
         (typeof json.message === "string" ? json.message : undefined) ??
         (typeof json.error === "string" ? json.error : undefined)
-      if (msg && msg.trim()) return msg.trim().slice(0, 200)
+      if (msg && msg.trim()) return redactSecrets(msg.trim()).slice(0, 200)
     } catch {}
-    if (!raw.startsWith("<")) return raw.slice(0, 200)
+    if (!raw.startsWith("<")) return redactSecrets(raw).slice(0, 200)
   } catch {}
   return undefined
 }

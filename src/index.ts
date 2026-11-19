@@ -27,7 +27,7 @@ import { createUpdater } from "./server/updater.ts"
 
 const TTL = 90_000
 const NEGATIVE_TTL = 25_000
-const MAX_RETRY_AFTER_MS = 5 * 60_000
+const MAX_RETRY_AFTER_MS = 24 * 60 * 60_000
 const DEADLINE = 25_000
 const HTTP_TIMEOUT = 10_000
 const INITIAL_UPDATE_DELAY_MS = 15_000
@@ -78,6 +78,43 @@ function isTokenError(error: unknown): boolean {
   return false
 }
 
+function isValidRow(raw: unknown): raw is LimitRow {
+  if (!raw || typeof raw !== "object") return false
+  const row = raw as Record<string, unknown>
+  return (
+    typeof row.label === "string" &&
+    typeof row.used === "number" &&
+    Number.isFinite(row.used) &&
+    typeof row.status === "string" &&
+    typeof row.resetsAt === "string" &&
+    typeof row.resetsIn === "string"
+  )
+}
+
+function sanitizeSnapshots(raw: unknown): UsageSnapshot[] {
+  if (!Array.isArray(raw)) return []
+  return raw.filter((item): item is UsageSnapshot => {
+    if (!item || typeof item !== "object") return false
+    const snap = item as Record<string, unknown>
+    return typeof snap.at === "number" && Number.isFinite(snap.at)
+  })
+}
+
+async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("credential lookup timed out")), Math.max(200, ms))
+        timer.unref?.()
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 function defaultLocale(): Locale {
   const envLang = process.env.OPENCODE_LANG || process.env.LC_ALL || process.env.LANG
   return normalizeLocale(envLang)
@@ -100,7 +137,7 @@ function formatCached(entry: CachedRaw, lang: Locale, history: readonly UsageSna
     tight: tightLine(rows, now, lang),
     error: "",
     stale,
-    snapshots: selectSnapshotsForClient(history, now, 24),
+    snapshots: selectSnapshotsForClient(history, now, 72),
   }
 }
 
@@ -140,8 +177,9 @@ export default Plugin.define({
     const savedDisk = await ctx.storage.get(LAST_GOOD_KEY).catch(() => undefined)
     if (savedDisk && typeof savedDisk === "object" && (savedDisk as { ok?: unknown }).ok === true) {
       const candidate = savedDisk as CachedRaw & { ok: true }
-      if (Array.isArray(candidate.rows) && candidate.rows.length > 0) {
-        diskCache = candidate
+      if (Array.isArray(candidate.rows)) {
+        const rows = candidate.rows.filter(isValidRow)
+        if (rows.length > 0) diskCache = { ...candidate, rows }
       }
     }
 
@@ -170,13 +208,11 @@ export default Plugin.define({
     let historyAccount = ""
     let history: UsageSnapshot[] = []
     if (Array.isArray(savedHistory)) {
-      history = (savedHistory as UsageSnapshot[]).filter((s) => s && typeof s.at === "number")
+      history = sanitizeSnapshots(savedHistory)
     } else if (savedHistory && typeof savedHistory === "object") {
       const rec = savedHistory as { account?: unknown; snapshots?: unknown }
       if (typeof rec.account === "string") historyAccount = rec.account
-      if (Array.isArray(rec.snapshots)) {
-        history = (rec.snapshots as UsageSnapshot[]).filter((s) => s && typeof s.at === "number")
-      }
+      history = sanitizeSnapshots(rec.snapshots)
     }
 
     const savedAuto = await ctx.storage.get("autoUpdate").catch(() => undefined)
@@ -234,7 +270,9 @@ export default Plugin.define({
               creds.dropCli()
               if (id.cached) sawStaleCli = true
             }
-            if (!isTokenError(error)) {
+            // 429/5xx may be token-specific: try the next credential instead of stopping discovery.
+            const retryableHttp = error instanceof HttpError && error.retryable
+            if (!isTokenError(error) && !retryableHttp) {
               fatal = true
               break
             }
@@ -243,20 +281,35 @@ export default Plugin.define({
         return null
       }
 
-      const primary = await tryList(await creds.listPrimary())
+      const primaryList = await withDeadline(creds.listPrimary(), deadline - Date.now()).catch((error) => {
+        lastError = error
+        fatal = true
+        return [] as Identity[]
+      })
+      const primary = await tryList(primaryList)
       if (primary) return primary
 
       if (!fatal && !stopEvents.signal.aborted && Date.now() < deadline - 200) {
-        const fallback = await tryList(await creds.listFallback())
+        const fallbackList = await withDeadline(creds.listFallback(), deadline - Date.now()).catch((error) => {
+          lastError = error
+          return [] as Identity[]
+        })
+        const fallback = await tryList(fallbackList)
         if (fallback) return fallback
       }
 
       if (!fatal && sawStaleCli && !stopEvents.signal.aborted && Date.now() < deadline - 500) {
-        const refreshed = await tryList(await creds.listFallback({ freshCli: true }))
+        const refreshedList = await withDeadline(creds.listFallback({ freshCli: true }), deadline - Date.now()).catch(
+          () => [] as Identity[],
+        )
+        const refreshed = await tryList(refreshedList)
         if (refreshed) return refreshed
       }
 
       if (!foundAny) {
+        if (lastError && fatal) {
+          return { ok: false, errorCode: "FETCH_FAILED", errorDetail: errorText(lastError, "en"), at: Date.now(), ttl: NEGATIVE_TTL }
+        }
         return { ok: false, errorCode: "NO_TOKEN", at: Date.now(), ttl: NEGATIVE_TTL }
       }
       const retryAfterMs = lastError instanceof HttpError && lastError.retryAfterMs ? lastError.retryAfterMs : 0
@@ -429,6 +482,8 @@ export default Plugin.define({
             }
             epoch += 1
             cache = null
+            // A different credential may belong to another account: never show the old account's card.
+            diskCache = null
             creds.dropCli()
             void rpc.events.emit("changed", {}).catch(() => {})
           }

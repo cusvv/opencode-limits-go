@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process"
-import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { createHash } from "node:crypto"
+import { existsSync } from "node:fs"
+import { cp, mkdir, mkdtemp, open, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -13,6 +15,9 @@ export const REPO = "cusvv/opencode-limits-go"
 const RELEASES_API = `https://api.github.com/repos/${REPO}/releases/latest`
 const CHECK_TTL_MS = 6 * 60 * 60 * 1000
 const MAX_ARCHIVE_BYTES = 10 * 1024 * 1024
+const MAX_EXTRACTED_BYTES = 60 * 1024 * 1024
+const UPDATE_LOCK = ".update.lock"
+const LOCK_STALE_MS = 15 * 60_000
 const TOP_LEVEL_FILES = [
   "package.json",
   "README.md",
@@ -37,9 +42,15 @@ export type UpdateStatus = {
   autoUpdated: boolean
   restartRequired: boolean
   managedByPackageManager: boolean
+  managedByDev: boolean
   releaseUrl: string
   checkedAtMs: number
   error: string
+}
+
+export function isDevInstall(pluginRoot: string): boolean {
+  const resolved = path.resolve(pluginRoot)
+  return existsSync(path.join(resolved, ".git")) || /[\\/]local-plugins[\\/]/i.test(resolved)
 }
 
 export function isPackageManagerInstall(pluginRoot: string): boolean {
@@ -73,7 +84,12 @@ export function isTrustedGitHubUrl(rawUrl: string): boolean {
     const parsed = new URL(rawUrl)
     if (parsed.protocol !== "https:") return false
     const host = parsed.hostname.toLowerCase()
-    return host === "github.com" || host === "api.github.com" || host.endsWith(".githubusercontent.com")
+    return (
+      host === "github.com" ||
+      host === "api.github.com" ||
+      host === "codeload.github.com" ||
+      host.endsWith(".githubusercontent.com")
+    )
   } catch {
     return false
   }
@@ -116,6 +132,77 @@ export function pickReleaseDownload(
   }
 
   return null
+}
+
+export function pickChecksumAsset(release: GitHubRelease): string | null {
+  const assets = Array.isArray(release.assets)
+    ? (release.assets as Array<{ name?: unknown; browser_download_url?: unknown }>)
+    : []
+  for (const asset of assets) {
+    const name = typeof asset.name === "string" ? asset.name.toLowerCase() : ""
+    const url = typeof asset.browser_download_url === "string" ? asset.browser_download_url : ""
+    if ((name === "sha256sums" || name === "sha256sums.txt" || name.endsWith(".sha256")) && isTrustedGitHubUrl(url)) {
+      return url
+    }
+  }
+  return null
+}
+
+export function parseChecksum(text: string, archiveName: string): string | null {
+  const lines = text.split(/\r?\n/)
+  for (const line of lines) {
+    const match = line.trim().match(/^([a-f0-9]{64})\s+\*?(.+)$/i)
+    if (!match) continue
+    const file = match[2].trim().split(/[\\/]/).pop() ?? ""
+    if (file === archiveName || (!file && lines.length === 1)) return match[1].toLowerCase()
+  }
+  return null
+}
+
+function sha256(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex")
+}
+
+async function acquireUpdateLock(root: string): Promise<() => Promise<void>> {
+  const lockPath = path.join(root, UPDATE_LOCK)
+  const attempt = async (): Promise<void> => {
+    const handle = await open(lockPath, "wx", 0o600)
+    try {
+      await handle.write(`${process.pid} ${Date.now()}`)
+    } finally {
+      await handle.close()
+    }
+  }
+  try {
+    await attempt()
+  } catch {
+    const info = await stat(lockPath).catch(() => null)
+    if (info && Date.now() - info.mtimeMs < LOCK_STALE_MS) {
+      throw new Error("Another update is already running")
+    }
+    await rm(lockPath, { force: true }).catch(() => {})
+    try {
+      await attempt()
+    } catch {
+      throw new Error("Another update is already running")
+    }
+  }
+  return async () => {
+    await rm(lockPath, { force: true }).catch(() => {})
+  }
+}
+
+async function assertExtractedSize(dir: string, total = { bytes: 0 }): Promise<number> {
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      await assertExtractedSize(full, total)
+    } else if (entry.isFile()) {
+      total.bytes += (await stat(full)).size
+      if (total.bytes > MAX_EXTRACTED_BYTES) throw new Error("Extracted archive is too large")
+    }
+  }
+  return total.bytes
 }
 
 async function defaultExtractArchive(
@@ -203,7 +290,9 @@ async function syncSourceTree(srcDir: string, destDir: string): Promise<void> {
 }
 
 export async function copyVerifiedPlugin(srcRoot: string, destRoot: string): Promise<void> {
+  // package.json goes last: if the copy is interrupted, the next start must see the old version and retry.
   for (const rel of TOP_LEVEL_FILES) {
+    if (rel === "package.json") continue
     const src = path.join(srcRoot, rel)
     if (await exists(src)) {
       await cp(src, path.join(destRoot, rel), { force: true })
@@ -217,11 +306,13 @@ export async function copyVerifiedPlugin(srcRoot: string, destRoot: string): Pro
   })
 
   await syncSourceTree(path.join(srcRoot, "src"), path.join(destRoot, "src"))
+  await cp(path.join(srcRoot, "package.json"), path.join(destRoot, "package.json"), { force: true })
 }
 
 export function createUpdater(deps: UpdaterDeps = {}) {
   const pluginRoot = deps.pluginRoot ?? defaultPluginRoot()
   const managedByPackageManager = isPackageManagerInstall(pluginRoot)
+  const managedByDev = isDevInstall(pluginRoot)
   const fetchFn = deps.fetchFn ?? fetch
   const extractFn = deps.extractFn ?? defaultExtractArchive
   const nowFn = deps.nowFn ?? Date.now
@@ -265,10 +356,23 @@ export function createUpdater(deps: UpdaterDeps = {}) {
       }
 
       const tmpBase = await mkdtemp(path.join(os.tmpdir(), "opencode-limits-go-update-"))
+      let releaseLock: (() => Promise<void>) | null = null
       try {
+        releaseLock = await acquireUpdateLock(pluginRoot)
+        const archiveName = new URL(download.url).pathname.split("/").pop() || "release"
         const archivePath = path.join(tmpBase, download.kind === "zip" ? "release.zip" : "release.tar.gz")
         const extractDir = path.join(tmpBase, "extracted")
         await mkdir(extractDir, { recursive: true })
+
+        const checksumUrl = pickChecksumAsset(release)
+        if (!checksumUrl) throw new Error("Release has no SHA256SUMS; refusing to install unverified code")
+        const checksumRes = await fetchFn(checksumUrl, {
+          headers: { Accept: "text/plain", "User-Agent": `opencode-limits-go/${await currentVersion()}` },
+          signal: AbortSignal.timeout(15_000),
+        })
+        if (!checksumRes.ok) throw new Error(`Checksum download failed: HTTP ${checksumRes.status}`)
+        const expectedHash = parseChecksum(await checksumRes.text(), archiveName)
+        if (!expectedHash) throw new Error(`SHA256SUMS has no entry for ${archiveName}`)
 
         const res = await fetchFn(download.url, {
           headers: {
@@ -282,18 +386,47 @@ export function createUpdater(deps: UpdaterDeps = {}) {
           throw new Error("Blocked redirect to untrusted download host")
         }
 
-        const bytes = new Uint8Array(await res.arrayBuffer())
-        if (bytes.byteLength === 0 || bytes.byteLength > MAX_ARCHIVE_BYTES) {
-          throw new Error(`Invalid archive size: ${bytes.byteLength} bytes`)
+        const contentLength = Number(res.headers.get("content-length") || "0")
+        if (contentLength > MAX_ARCHIVE_BYTES) throw new Error(`Archive is too large: ${contentLength} bytes`)
+        const chunks: Uint8Array[] = []
+        let total = 0
+        const reader = res.body?.getReader()
+        if (reader) {
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            if (!value) continue
+            total += value.byteLength
+            if (total > MAX_ARCHIVE_BYTES) throw new Error(`Archive is too large: more than ${MAX_ARCHIVE_BYTES} bytes`)
+            chunks.push(value)
+          }
+        } else {
+          const value = new Uint8Array(await res.arrayBuffer())
+          total = value.byteLength
+          chunks.push(value)
         }
+        if (total === 0 || total > MAX_ARCHIVE_BYTES) throw new Error(`Invalid archive size: ${total} bytes`)
+        const bytes = new Uint8Array(total)
+        let offset = 0
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset)
+          offset += chunk.byteLength
+        }
+        if (sha256(bytes) !== expectedHash) throw new Error("Downloaded archive checksum does not match SHA256SUMS")
         await writeFile(archivePath, bytes)
 
         await extractFn(archivePath, extractDir, download.kind)
+        await assertExtractedSize(extractDir)
         const verifiedRoot = await findVerifiedPluginRoot(extractDir)
         const pkg = await readPackageVersion(verifiedRoot)
-        const targetVersion = pkg?.version ?? expectedVersion
+        if (!pkg || pkg.version !== expectedVersion) {
+          throw new Error(`Release version mismatch: archive has ${pkg?.version ?? "unknown"}, expected ${expectedVersion}`)
+        }
+        const targetVersion = pkg.version
 
         await copyVerifiedPlugin(verifiedRoot, pluginRoot)
+        const installed = await readPackageVersion(pluginRoot)
+        if (!installed || installed.version !== targetVersion) throw new Error("Installed files did not verify after copy")
         installedVersion = targetVersion
         deps.onInstalled?.(targetVersion)
         log("plugin auto-updated", { version: targetVersion })
@@ -304,6 +437,7 @@ export function createUpdater(deps: UpdaterDeps = {}) {
         log("plugin update failed", { error: msg })
         return { ok: false, version: "", restartRequired: false, error: msg }
       } finally {
+        await releaseLock?.()
         await rm(tmpBase, { recursive: true, force: true }).catch(() => {})
       }
     })()
@@ -343,7 +477,7 @@ export function createUpdater(deps: UpdaterDeps = {}) {
         let autoUpdated = false
         let installError = ""
 
-        if (release && updateAvailable && opts.autoInstall && !installedVersion && !managedByPackageManager) {
+        if (release && updateAvailable && opts.autoInstall && !installedVersion && !managedByPackageManager && !managedByDev) {
           const installed = await installFromRelease(release, latestVersion)
           autoUpdated = installed.ok
           if (!installed.ok) installError = installed.error
@@ -356,6 +490,7 @@ export function createUpdater(deps: UpdaterDeps = {}) {
           autoUpdated,
           restartRequired: !!installedVersion,
           managedByPackageManager,
+          managedByDev,
           releaseUrl,
           checkedAtMs: nowFn(),
           error: installError,
@@ -372,6 +507,7 @@ export function createUpdater(deps: UpdaterDeps = {}) {
           autoUpdated: false,
           restartRequired: !!installedVersion,
           managedByPackageManager,
+          managedByDev,
           releaseUrl: lastStatus?.releaseUrl || `https://github.com/${REPO}/releases`,
           checkedAtMs: nowFn(),
           error: msg,
@@ -399,6 +535,14 @@ export function createUpdater(deps: UpdaterDeps = {}) {
         version: "",
         restartRequired: false,
         error: "Managed by OpenCode package manager. Run: opencode plugin update",
+      }
+    }
+    if (managedByDev) {
+      return {
+        ok: false,
+        version: "",
+        restartRequired: false,
+        error: "Development install (git or local-plugins). Update with git pull; automatic overwrite is disabled.",
       }
     }
     const status = await check({ force: true, autoInstall: false })

@@ -1,5 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -11,6 +12,9 @@ import {
   isTrustedGitHubUrl,
   pickReleaseDownload,
 } from "./updater.ts"
+
+const ARCHIVE_BYTES = new Uint8Array([1, 2, 3, 4])
+const ARCHIVE_HASH = createHash("sha256").update(ARCHIVE_BYTES).digest("hex")
 
 test("isTrustedGitHubUrl accepts only HTTPS GitHub hosts", () => {
   assert.equal(isTrustedGitHubUrl("https://github.com/cusvv/opencode-limits-go/releases/download/v1.5.0/a.tar.gz"), true)
@@ -94,12 +98,19 @@ test("createUpdater detects newer release and auto-installs once", async () => {
                   name: "opencode-limits-go.tar.gz",
                   browser_download_url: "https://github.com/cusvv/opencode-limits-go/releases/download/v1.5.1/opencode-limits-go.tar.gz",
                 },
+                {
+                  name: "SHA256SUMS",
+                  browser_download_url: "https://github.com/cusvv/opencode-limits-go/releases/download/v1.5.1/SHA256SUMS",
+                },
               ],
             }),
             { status: 200 },
           )
         }
-        return new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 })
+        if (url.endsWith("/SHA256SUMS")) {
+          return new Response(`${ARCHIVE_HASH}  opencode-limits-go.tar.gz\n`, { status: 200 })
+        }
+        return new Response(ARCHIVE_BYTES, { status: 200 })
       },
       extractFn: async (_archive, outDir) => {
         const root = path.join(outDir, "opencode-limits-go")
@@ -123,6 +134,34 @@ test("createUpdater detects newer release and auto-installs once", async () => {
     assert.equal(res.updateAvailable, false)
     assert.equal(notified, "1.5.1")
     assert.equal(JSON.parse(await readFile(path.join(tmp, "package.json"), "utf8")).version, "1.5.1")
+  } finally {
+    await rm(tmp, { recursive: true, force: true })
+  }
+})
+
+test("createUpdater never overwrites a git/local-plugins development install", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "opencode-limits-go-dev-"))
+  try {
+    await mkdir(path.join(tmp, ".git"), { recursive: true })
+    await writeFile(path.join(tmp, "package.json"), JSON.stringify({ name: "opencode-limits-go", version: "1.5.0" }))
+    const updater = createUpdater({
+      pluginRoot: tmp,
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            tag_name: "v1.5.1",
+            html_url: "https://github.com/cusvv/opencode-limits-go/releases/tag/v1.5.1",
+          }),
+          { status: 200 },
+        ),
+    })
+    const res = await updater.check({ force: true, autoInstall: true })
+    assert.equal(res.managedByDev, true)
+    assert.equal(res.autoUpdated, false)
+    assert.equal(res.updateAvailable, true)
+    const manual = await updater.install()
+    assert.equal(manual.ok, false)
+    assert.ok(manual.error.includes("git pull"))
   } finally {
     await rm(tmp, { recursive: true, force: true })
   }

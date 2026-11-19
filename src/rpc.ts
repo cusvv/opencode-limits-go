@@ -118,6 +118,7 @@ export const Limits = Rpc.define({
           autoUpdated: { type: "boolean" },
           restartRequired: { type: "boolean" },
           managedByPackageManager: { type: "boolean" },
+          managedByDev: { type: "boolean" },
           releaseUrl: { type: "string" },
           checkedAtMs: { type: "number" },
           error: { type: "string" },

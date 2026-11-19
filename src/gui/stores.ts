@@ -10,6 +10,7 @@ export type UpdateStatusInfo = {
   autoUpdated: boolean
   restartRequired: boolean
   managedByPackageManager?: boolean
+  managedByDev?: boolean
   releaseUrl: string
   checkedAtMs: number
   error: string

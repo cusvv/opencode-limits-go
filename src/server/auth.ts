@@ -325,9 +325,13 @@ async function defaultRunCli(): Promise<unknown> {
   const command = win ? "cmd.exe" : "sh"
   const args = win ? ["/d", "/c", "opencode auth export"] : ["-c", "opencode auth export"]
   const { stdout } = await exec(command, args, {
-    timeout: 30_000,
+    // 8s keeps credential discovery inside the status deadline.
+    timeout: 8_000,
     windowsHide: true,
     maxBuffer: 4 * 1024 * 1024,
+    // cmd.exe searches the current directory before PATH: never let a repo-provided opencode.cmd run.
+    cwd: os.homedir(),
+    env: win ? { ...process.env, NoDefaultCurrentDirectoryInExePath: "1" } : process.env,
   })
   // JSON.parse errors can quote a fragment of stdout containing tokens: do not rethrow the original error.
   try {
@@ -386,27 +390,46 @@ function dedupe(list: Identity[]): Identity[] {
   })
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((resolve) => {
+      const timer = setTimeout(() => resolve(fallback), ms)
+      timer.unref?.()
+    }),
+  ])
+}
+
+const CLI_TTL_MS = 10 * 60_000
+const HOST_HOOK_TIMEOUT_MS = 8_000
+
 export function createCredentials(deps: CredentialsDeps = {}) {
   const env = deps.env ?? process.env
   const runCli = deps.runCli ?? defaultRunCli
   const readLegacy = deps.readLegacyAuth ?? (() => defaultReadLegacyAuth(env))
   let cli: Identity[] | null = null
+  let cliAt = 0
 
   async function listPrimary(): Promise<Identity[]> {
     const [fromInt, fromCfg] = await Promise.all([
-      fromIntegration(deps.integration),
-      fromConfigAndProvider(deps.options, deps.provider),
+      withTimeout(fromIntegration(deps.integration), HOST_HOOK_TIMEOUT_MS, [] as Identity[]),
+      withTimeout(fromConfigAndProvider(deps.options, deps.provider), HOST_HOOK_TIMEOUT_MS, {
+        identities: [] as Identity[],
+        envNames: [] as string[],
+      }),
     ])
     const envList = fromEnv(env, fromCfg.envNames)
     return dedupe([...fromInt, ...fromCfg.identities, ...envList])
   }
 
   async function listFallback(opts: { freshCli?: boolean } = {}): Promise<Identity[]> {
-    const cliWasCached = !opts.freshCli && cli !== null
-    if (opts.freshCli || cli === null) {
+    const cliExpired = Date.now() - cliAt > CLI_TTL_MS
+    const cliWasCached = !opts.freshCli && cli !== null && !cliExpired
+    if (opts.freshCli || cli === null || cliExpired) {
       try {
-        const parsed = parseCliExport(await runCli())
+        const parsed = parseCliExport(await withTimeout(runCli(), 8_000, null))
         cli = parsed.length ? parsed : null
+        cliAt = Date.now()
       } catch (error) {
         log("cli export failed", { error: errorText(error) })
         cli = null
@@ -432,6 +455,7 @@ export function createCredentials(deps: CredentialsDeps = {}) {
     },
     dropCli() {
       cli = null
+      cliAt = 0
     },
   }
 }
