@@ -397,3 +397,97 @@ test("formatTuiSidebar supports window filter, inline mini-bars, and hot pace in
   assert.ok(detail.includes("+12%"))
   assert.ok(detail.includes("Today: Go 142k tok · Zen $0.04"))
 })
+
+test("recoveredAlerts detects drop from 100% and resetAlertMessage localizes cleanly", async () => {
+  const { recoveredAlerts, resetAlertMessage } = await import("./model.ts")
+  const exhausted = new Set<string>()
+  const rowFull = { key: "rolling" as const, label: "5h", used: 100, status: "limited", resetsAt: "", resetsIn: "" }
+  const rowReset = { key: "rolling" as const, label: "5h", used: 0, status: "ok", resetsAt: "", resetsIn: "" }
+
+  assert.equal(recoveredAlerts([rowFull], exhausted).length, 0)
+  assert.ok(exhausted.has("rolling"))
+
+  const rec = recoveredAlerts([rowReset], exhausted)
+  assert.equal(rec.length, 1)
+  assert.equal(exhausted.has("rolling"), false)
+  assert.match(resetAlertMessage(rec[0], "en"), /5h limit reset/)
+  assert.match(resetAlertMessage(rec[0], "ru"), /Лимит 5ч сброшен/)
+
+  // Second poll at 0% must not re-fire.
+  assert.equal(recoveredAlerts([rowReset], exhausted).length, 0)
+})
+
+test("shortErrorLabel, relativeAge, displayPercent, and accountKey work as expected", async () => {
+  const { accountKey, displayPercent, relativeAge, shortErrorLabel } = await import("./model.ts")
+  assert.equal(shortErrorLabel("No OpenCode Go token found. Run: opencode auth login", "en"), "no token")
+  assert.equal(shortErrorLabel("Нет токена OpenCode Go. Выполни...", "ru"), "нет токена")
+  assert.equal(shortErrorLabel("HTTP 401: Unauthorized", "en"), "auth error")
+  assert.equal(shortErrorLabel("HTTP 429: Too Many Requests", "ru"), "слишком часто")
+  assert.equal(shortErrorLabel("fetch failed: ECONNREFUSED", "en"), "offline")
+  assert.equal(shortErrorLabel("some random failure", "ru"), "ошибка")
+
+  assert.equal(displayPercent(82, false), 82)
+  assert.equal(displayPercent(82, true), 18)
+  assert.equal(displayPercent(120, true), 0)
+
+  assert.equal(relativeAge(NOW - 10_000, NOW, "en"), "just now")
+  assert.equal(relativeAge(NOW - 10_000, NOW, "ru"), "только что")
+  assert.equal(relativeAge(NOW - 5 * 60_000, NOW, "en"), "5m ago")
+  assert.equal(relativeAge(NOW - 2 * 3_600_000, NOW, "ru"), "2ч назад")
+
+  assert.equal(accountKey(" Personal ", "Dev@Example.com", "integration:oauth"), "personal|dev@example.com|integration:oauth")
+})
+
+test("selectSnapshotsForClient preserves 15m-4h anchor snapshots during rapid bursts", async () => {
+  const { selectSnapshotsForClient } = await import("./model.ts")
+  const now = 1_700_000_000_000
+  const history = [
+    { at: now - 90 * 60_000, rolling: 10 },
+    { at: now - 60 * 60_000, rolling: 15 },
+    { at: now - 30 * 60_000, rolling: 25 },
+    // 30 rapid updates in the last 10 minutes
+    ...Array.from({ length: 30 }, (_, i) => ({
+      at: now - (30 - i) * 20_000,
+      rolling: 30 + i,
+    })),
+  ]
+  const selected = selectSnapshotsForClient(history, now, 24)
+  assert.ok(selected.length <= 24)
+  // Must retain the ~60m anchor snapshot even though there are 30 newer entries!
+  assert.ok(selected.some((s) => s.at === now - 60 * 60_000))
+  assert.equal(selected[selected.length - 1].at, history[history.length - 1].at)
+})
+
+test("summarizeStatsByProvider extracts topModels and formatTuiSidebar shows remaining % and exhausted reset countdown", async () => {
+  const { formatTuiSidebar, summarizeStatsByProvider } = await import("./model.ts")
+  const summary = summarizeStatsByProvider([
+    { model: { providerID: "opencode-go", modelID: "claude-sonnet" }, steps: 12, cost: 0, tokens: { input: 80_000, output: 18_000, reasoning: 0 } },
+    { model: { providerID: "opencode-go", modelID: "gemini-pro" }, steps: 5, cost: 0, tokens: { input: 40_000, output: 4_000, reasoning: 0 } },
+    { model: { providerID: "opencode", modelID: "gpt-5" }, steps: 2, cost: 0.12, tokens: { input: 10_000, output: 2_000, reasoning: 0 } },
+    { model: { providerID: "opencode-go", modelID: "haiku" }, steps: 1, cost: 0, tokens: { input: 1_000, output: 500, reasoning: 0 } },
+  ])
+  assert.equal(summary.topModels.length, 3)
+  assert.equal(summary.topModels[0].modelID, "claude-sonnet")
+  assert.equal(summary.topModels[0].tokens, 98_000)
+  assert.equal(summary.topModels[1].modelID, "gemini-pro")
+
+  const now = 1_700_000_000_000
+  const card = {
+    ok: true as const,
+    org: "Personal",
+    email: "",
+    source: "",
+    checkedAt: "",
+    tight: "",
+    error: "",
+    rows: [
+      { key: "rolling" as const, label: "5h", used: 100, status: "limited", resetsAt: "", resetsAtMs: now + 42 * 60_000, resetsIn: "42m" },
+      { key: "weekly" as const, label: "1w", used: 30, status: "ok", resetsAt: "", resetsAtMs: now + 3 * 86_400_000, resetsIn: "3d" },
+    ],
+  }
+  const exhaustedText = formatTuiSidebar(card, { rolling: true, weekly: true, monthly: false }, false, "en", now, false)
+  assert.equal(exhaustedText, "5h 100% (42m) · 1w 30%")
+
+  const remainingText = formatTuiSidebar(card, { rolling: true, weekly: true, monthly: false }, false, "en", now, true)
+  assert.equal(remainingText, "5h 0% (42m) · 1w 70%")
+})

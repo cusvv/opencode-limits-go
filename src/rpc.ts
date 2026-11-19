@@ -11,6 +11,7 @@ const rowSchema = {
     resetsAtMs: { type: "number" },
     resetsIn: { type: "string" },
     delta1h: { type: "number" },
+    deltaSpanMs: { type: "number" },
   },
   required: ["label", "used", "status", "resetsAt", "resetsIn"],
 } as const

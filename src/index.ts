@@ -10,6 +10,7 @@ import {
   type LimitRow,
   type Locale,
   type UsageSnapshot,
+  accountKey,
   attachHistoryDeltas,
   emptyCard,
   errorText,
@@ -18,6 +19,7 @@ import {
   normalizeLocale,
   parseUsage,
   recordUsageSnapshot,
+  selectSnapshotsForClient,
   tightLine,
 } from "./model.ts"
 import { createUpdater } from "./updater.ts"
@@ -83,7 +85,7 @@ function formatCached(entry: CachedRaw, lang: Locale, history: readonly UsageSna
     rows,
     tight: tightLine(rows, now, lang),
     error: "",
-    snapshots: history.slice(-24),
+    snapshots: selectSnapshotsForClient(history, now, 24),
   }
 }
 
@@ -97,13 +99,22 @@ export default Plugin.define({
     })
     const stopEvents = new AbortController()
     let cache: CachedRaw | null = null
-    let inflight: Promise<CachedRaw> | null = null
+    let inflight: { epoch: number; promise: Promise<CachedRaw> } | null = null
+    let epoch = 0
     let rpcRef: { events: { emit: (name: "changed" | "updated", data: any) => Promise<void> } } | null = null
 
     const savedHistory = await ctx.storage.get(HISTORY_KEY).catch(() => undefined)
-    let history: UsageSnapshot[] = Array.isArray(savedHistory)
-      ? (savedHistory as UsageSnapshot[]).filter((s) => s && typeof s.at === "number")
-      : []
+    let historyAccount = ""
+    let history: UsageSnapshot[] = []
+    if (Array.isArray(savedHistory)) {
+      history = (savedHistory as UsageSnapshot[]).filter((s) => s && typeof s.at === "number")
+    } else if (savedHistory && typeof savedHistory === "object") {
+      const rec = savedHistory as { account?: unknown; snapshots?: unknown }
+      if (typeof rec.account === "string") historyAccount = rec.account
+      if (Array.isArray(rec.snapshots)) {
+        history = (rec.snapshots as UsageSnapshot[]).filter((s) => s && typeof s.at === "number")
+      }
+    }
 
     const savedAuto = await ctx.storage.get("autoUpdate").catch(() => undefined)
     let autoUpdate =
@@ -208,26 +219,38 @@ export default Plugin.define({
         return formatCached(cache, lang, history)
       }
 
-      if (!inflight) {
-        inflight = (async (): Promise<CachedRaw> => {
+      if (!inflight || inflight.epoch !== epoch) {
+        const runEpoch = epoch
+        const promise = (async (): Promise<CachedRaw> => {
           const next = await load()
+          if (runEpoch !== epoch) return next
           if (!stopEvents.signal.aborted || next.ok) {
             cache = next
           }
           if (next.ok) {
-            const nextHistory = recordUsageSnapshot(history, next.rows, next.checkedAtMs)
-            if (nextHistory.length !== history.length || nextHistory[nextHistory.length - 1] !== history[history.length - 1]) {
+            const acct = accountKey(next.org, next.email, next.source)
+            const baseHistory = historyAccount && historyAccount !== acct ? [] : history
+            const nextHistory = recordUsageSnapshot(baseHistory, next.rows, next.checkedAtMs)
+            const changed =
+              historyAccount !== acct ||
+              nextHistory.length !== history.length ||
+              nextHistory[nextHistory.length - 1] !== history[history.length - 1]
+            if (changed) {
+              historyAccount = acct
               history = nextHistory
-              void ctx.storage.set(HISTORY_KEY, history as unknown as any).catch(() => {})
+              void ctx.storage
+                .set(HISTORY_KEY, { account: historyAccount, snapshots: history } as unknown as any)
+                .catch(() => {})
             }
           }
           return next
         })().finally(() => {
-          inflight = null
+          if (inflight?.promise === promise) inflight = null
         })
+        inflight = { epoch: runEpoch, promise }
       }
 
-      const raw = await inflight
+      const raw = await inflight.promise
       return formatCached(raw, lang, history)
     }
 
@@ -308,6 +331,7 @@ export default Plugin.define({
               usageDebounce.unref?.()
               continue
             }
+            epoch += 1
             cache = null
             creds.dropCli()
             void rpc.events.emit("changed", {}).catch(() => {})

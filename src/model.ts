@@ -17,6 +17,7 @@ export type LimitRow = {
   resetsAtMs?: number
   resetsIn: string
   delta1h?: number
+  deltaSpanMs?: number
 }
 
 export type LimitCard = {
@@ -255,6 +256,75 @@ export function newAlerts(rows: LimitRow[], notified: Map<string, number>, warnT
   return alerts
 }
 
+// Track windows that were exhausted (>= 100%) and return those that recovered (< 100%).
+export function recoveredAlerts(rows: LimitRow[], wasExhausted: Set<string>): LimitRow[] {
+  const recovered: LimitRow[] = []
+  for (const row of rows) {
+    const id = row.key ?? row.label
+    const exhausted = row.used >= 100 || row.status === "limited"
+    if (exhausted) {
+      wasExhausted.add(id)
+    } else if (wasExhausted.has(id)) {
+      wasExhausted.delete(id)
+      recovered.push(row)
+    }
+  }
+  return recovered
+}
+
+export function resetAlertMessage(row: LimitRow, lang: Locale = "en"): string {
+  const label = windowLabel(row, lang)
+  return lang === "ru"
+    ? `Лимит ${label} сброшен — OpenCode Go снова доступен`
+    : `${label} limit reset — OpenCode Go is available again`
+}
+
+export function displayPercent(used: number, showRemaining = false): number {
+  const clamped = Math.min(100, Math.max(0, Math.round(used)))
+  return showRemaining ? 100 - clamped : clamped
+}
+
+export function shortErrorLabel(error: string | undefined, lang: Locale = "en"): string {
+  const raw = (error ?? "").toLowerCase()
+  if (!raw) return lang === "ru" ? "нет данных" : "no data"
+  if (raw.includes("no_token") || raw.includes("no opencode go token") || raw.includes("нет токена")) {
+    return lang === "ru" ? "нет токена" : "no token"
+  }
+  if (raw.includes("401") || raw.includes("403") || raw.includes("unauthorized") || raw.includes("forbidden")) {
+    return lang === "ru" ? "ошибка входа" : "auth error"
+  }
+  if (raw.includes("429") || raw.includes("rate limit")) {
+    return lang === "ru" ? "слишком часто" : "rate limited"
+  }
+  if (
+    raw.includes("cannot reach") ||
+    raw.includes("нет связи") ||
+    raw.includes("fetch failed") ||
+    raw.includes("enotfound") ||
+    raw.includes("econnrefused") ||
+    raw.includes("timeout") ||
+    raw.includes("aborted")
+  ) {
+    return lang === "ru" ? "офлайн" : "offline"
+  }
+  return lang === "ru" ? "ошибка" : "error"
+}
+
+export function relativeAge(checkedAtMs: number | undefined, now = Date.now(), lang: Locale = "en"): string {
+  if (!checkedAtMs || checkedAtMs <= 0) return ""
+  const diff = Math.max(0, now - checkedAtMs)
+  if (diff < 45_000) return lang === "ru" ? "только что" : "just now"
+  const mins = Math.round(diff / 60_000)
+  if (mins < 60) return lang === "ru" ? `${mins}м назад` : `${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  return lang === "ru" ? `${hours}ч назад` : `${hours}h ago`
+}
+
+export function accountKey(org: string, email: string, source: string): string {
+  const norm = (s: string) => s.trim().toLowerCase()
+  return `${norm(org)}|${norm(email)}|${norm(source)}`
+}
+
 export function redactSecrets(text: string): string {
   return text
     .replace(/Bearer\s+[^\s"'`]+/gi, "Bearer [REDACTED]")
@@ -300,13 +370,21 @@ export function formatTuiSidebar(
   showBars = false,
   lang: Locale = "en",
   now = Date.now(),
+  showRemaining = false,
 ): string {
-  if (!card.ok) return cardText(card, lang)
+  if (!card.ok) return `${lang === "ru" ? "лимиты" : "limits"}: ${shortErrorLabel(card.error, lang)}`
   return filterStripRows(card.rows, visible)
     .map((row) => {
       const lbl = windowLabel(row, lang)
+      const pct = displayPercent(row.used, showRemaining)
       const hot = estimateWindowPace(row, now, lang, card.snapshots)?.kind === "hot" ? "⚡" : ""
-      return showBars ? `${lbl} ${bar(row.used, 4)} ${row.used}%${hot}` : `${lbl} ${row.used}%${hot}`
+      let resetHint = ""
+      if ((row.used >= 100 || row.status === "limited") && row.resetsAtMs && row.resetsAtMs > now) {
+        resetHint = ` (${span(row.resetsAtMs - now, lang)})`
+      }
+      return showBars
+        ? `${lbl} ${bar(row.used, 4)} ${pct}%${hot}${resetHint}`
+        : `${lbl} ${pct}%${hot}${resetHint}`
     })
     .join(" · ")
 }
@@ -429,6 +507,35 @@ export function recentWindowDelta(
   return { delta, spanMs: best.ageMs, pctPerHour }
 }
 
+export function selectSnapshotsForClient(
+  history: readonly UsageSnapshot[],
+  now = Date.now(),
+  limit = 24,
+): UsageSnapshot[] {
+  if (history.length <= limit) return [...history]
+  const picked = new Map<number, UsageSnapshot>()
+  // Always keep a few anchor snapshots in the 15m..4h window so recentWindowDelta stays accurate during bursts.
+  for (const targetMs of [15 * 60_000, 30 * 60_000, 60 * 60_000, 2 * 3_600_000, 4 * 3_600_000]) {
+    let best: UsageSnapshot | null = null
+    let bestDiff = Number.POSITIVE_INFINITY
+    for (const snap of history) {
+      const age = now - snap.at
+      if (age < 15 * 60_000 || age > 4 * 3_600_000) continue
+      const diff = Math.abs(age - targetMs)
+      if (diff < bestDiff) {
+        bestDiff = diff
+        best = snap
+      }
+    }
+    if (best) picked.set(best.at, best)
+  }
+  const tailCount = Math.max(1, limit - picked.size)
+  for (const snap of history.slice(-tailCount)) {
+    picked.set(snap.at, snap)
+  }
+  return [...picked.values()].sort((a, b) => a.at - b.at)
+}
+
 export function attachHistoryDeltas(
   rows: readonly LimitRow[],
   history: readonly UsageSnapshot[] | undefined,
@@ -440,7 +547,7 @@ export function attachHistoryDeltas(
     if (!key) return row
     const recent = recentWindowDelta(history, key, row.used, now)
     if (!recent || recent.delta < 1) return row
-    return { ...row, delta1h: Math.round(recent.delta) }
+    return { ...row, delta1h: Math.round(recent.delta), deltaSpanMs: Math.round(recent.spanMs) }
   })
 }
 
@@ -583,6 +690,14 @@ export function paceSummary(
   }
 }
 
+export type ModelUsageSummary = {
+  modelID: string
+  providerID: string
+  tokens: number
+  costUsd: number
+  steps: number
+}
+
 export type ProviderActivitySummary = {
   goTokens: number
   goSteps: number
@@ -590,10 +705,11 @@ export type ProviderActivitySummary = {
   zenCostUsd: number
   zenSteps: number
   totalCostUsd: number
+  topModels: ModelUsageSummary[]
 }
 
 type ModelUsageLike = {
-  model?: { providerID?: unknown }
+  model?: { providerID?: unknown; modelID?: unknown }
   steps?: unknown
   cost?: unknown
   tokens?: {
@@ -615,10 +731,13 @@ export function summarizeStatsByProvider(models: readonly ModelUsageLike[] | und
     zenCostUsd: 0,
     zenSteps: 0,
     totalCostUsd: 0,
+    topModels: [],
   }
   if (!models?.length) return out
+  const byModel = new Map<string, ModelUsageSummary>()
   for (const item of models) {
     const provider = typeof item.model?.providerID === "string" ? item.model.providerID : ""
+    const modelID = typeof item.model?.modelID === "string" ? item.model.modelID.trim() : ""
     const steps = num(item.steps)
     const cost = num(item.cost)
     const tokens = num(item.tokens?.input) + num(item.tokens?.output) + num(item.tokens?.reasoning)
@@ -631,7 +750,21 @@ export function summarizeStatsByProvider(models: readonly ModelUsageLike[] | und
       out.zenTokens += tokens
       out.zenCostUsd += cost
     }
+    if ((provider === "opencode-go" || provider === "opencode") && modelID && (tokens > 0 || cost > 0)) {
+      const key = `${provider}/${modelID}`
+      const prev = byModel.get(key)
+      if (prev) {
+        prev.tokens += tokens
+        prev.costUsd += cost
+        prev.steps += steps
+      } else {
+        byModel.set(key, { modelID, providerID: provider, tokens, costUsd: cost, steps })
+      }
+    }
   }
+  out.topModels = [...byModel.values()]
+    .sort((a, b) => b.tokens - a.tokens || b.costUsd - a.costUsd)
+    .slice(0, 3)
   return out
 }
 
