@@ -4,6 +4,6 @@
     "jsx": "react-jsx",
     "jsxImportSource": "solid-js"
   },
-  "include": ["src/gui.tsx", "src/gui/**/*.ts", "src/gui/**/*.tsx", "src/rpc.ts", "src/model.ts"],
+  "include": ["src/gui.tsx", "src/gui/**/*.ts", "src/gui/**/*.tsx", "src/rpc.ts", "src/core/**/*.ts"],
   "exclude": []
 }

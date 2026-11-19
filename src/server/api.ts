@@ -1,4 +1,4 @@
-import { CodedError } from "./model.ts"
+import { CodedError } from "../core/index.ts"
 
 const ENDPOINT = "https://opencode.ai/zen/go/v1/usage"
 

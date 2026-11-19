@@ -1,8 +1,8 @@
 import { Plugin } from "@opencode/plugin"
 import { Limits } from "./rpc.ts"
-import { type Identity, createCredentials } from "./auth.ts"
-import { HttpError, fetchUsage } from "./api.ts"
-import { log } from "./log.ts"
+import { type Identity, createCredentials } from "./server/auth.ts"
+import { HttpError, fetchUsage } from "./server/api.ts"
+import { log } from "./server/log.ts"
 import {
   CodedError,
   type ErrorCode,
@@ -22,8 +22,8 @@ import {
   recordUsageSnapshot,
   selectSnapshotsForClient,
   tightLine,
-} from "./model.ts"
-import { createUpdater } from "./updater.ts"
+} from "./core/index.ts"
+import { createUpdater } from "./server/updater.ts"
 
 const TTL = 90_000
 const NEGATIVE_TTL = 25_000

@@ -18,7 +18,7 @@ import {
   sourceLabel,
   span,
   tightLine,
-} from "./model.ts"
+} from "./index.ts"
 
 const NOW = Date.parse("2026-11-17T10:00:00Z")
 
@@ -187,7 +187,7 @@ test("retry stops on the first success, does not pause after final attempt, and 
 })
 
 test("estimateWindowPace suppresses tiny/early-window noise and flags heavy bursts", async () => {
-  const { estimateWindowPace, paceSummary } = await import("./model.ts")
+  const { estimateWindowPace, paceSummary } = await import("./index.ts")
   const now = 1_700_000_000_000
   const weekMs = 7 * 24 * 60 * 60 * 1000
 
@@ -259,7 +259,7 @@ test("estimateWindowPace suppresses tiny/early-window noise and flags heavy burs
 })
 
 test("cardDetail appends smart pace line when significant", async () => {
-  const { cardDetail } = await import("./model.ts")
+  const { cardDetail } = await import("./index.ts")
   const now = 1_700_000_000_000
   const weekMs = 7 * 24 * 60 * 60 * 1000
 
@@ -292,7 +292,7 @@ test("cardDetail appends smart pace line when significant", async () => {
 })
 
 test("filterStripRows selects enabled windows and falls back if none are selected", async () => {
-  const { filterStripRows, rowWindowKey } = await import("./model.ts")
+  const { filterStripRows, rowWindowKey } = await import("./index.ts")
   const rows = [
     { key: "rolling" as const, label: "5h", used: 12, status: "ok", resetsAt: "", resetsIn: "" },
     { label: "1н", used: 40, status: "ok", resetsAt: "", resetsIn: "" },
@@ -309,7 +309,7 @@ test("filterStripRows selects enabled windows and falls back if none are selecte
 })
 
 test("history ring buffer computes recent deltas, detects late-window bursts, and calculates elapsed ratio", async () => {
-  const { attachHistoryDeltas, estimateWindowPace, recordUsageSnapshot, windowElapsedRatio } = await import("./model.ts")
+  const { attachHistoryDeltas, estimateWindowPace, recordUsageSnapshot, windowElapsedRatio } = await import("./index.ts")
   const now = 1_700_000_000_000
   const weekMs = 7 * 86_400_000
 
@@ -343,7 +343,7 @@ test("history ring buffer computes recent deltas, detects late-window bursts, an
 })
 
 test("newAlerts supports custom warning thresholds and summarizeStatsByProvider splits Go vs Zen", async () => {
-  const { formatTokensCompact, formatUsd, newAlerts, summarizeStatsByProvider } = await import("./model.ts")
+  const { formatTokensCompact, formatUsd, newAlerts, summarizeStatsByProvider } = await import("./index.ts")
 
   const notified = new Map<string, number>()
   const rows = [{ key: "rolling" as const, label: "5h", used: 72, status: "ok", resetsAt: "", resetsIn: "" }]
@@ -369,7 +369,7 @@ test("newAlerts supports custom warning thresholds and summarizeStatsByProvider 
 })
 
 test("formatTuiSidebar supports window filter, inline mini-bars, and hot pace indicator", async () => {
-  const { cardDetail, formatTuiSidebar } = await import("./model.ts")
+  const { cardDetail, formatTuiSidebar } = await import("./index.ts")
   const now = 1_700_000_000_000
   const hourMs = 3_600_000
   const card = {
@@ -399,7 +399,7 @@ test("formatTuiSidebar supports window filter, inline mini-bars, and hot pace in
 })
 
 test("recoveredAlerts detects drop from 100% and resetAlertMessage localizes cleanly", async () => {
-  const { recoveredAlerts, resetAlertMessage } = await import("./model.ts")
+  const { recoveredAlerts, resetAlertMessage } = await import("./index.ts")
   const exhausted = new Set<string>()
   const rowFull = { key: "rolling" as const, label: "5h", used: 100, status: "limited", resetsAt: "", resetsIn: "" }
   const rowReset = { key: "rolling" as const, label: "5h", used: 0, status: "ok", resetsAt: "", resetsIn: "" }
@@ -418,7 +418,7 @@ test("recoveredAlerts detects drop from 100% and resetAlertMessage localizes cle
 })
 
 test("shortErrorLabel, relativeAge, displayPercent, and accountKey work as expected", async () => {
-  const { accountKey, displayPercent, relativeAge, shortErrorLabel } = await import("./model.ts")
+  const { accountKey, displayPercent, relativeAge, shortErrorLabel } = await import("./index.ts")
   assert.equal(shortErrorLabel("No OpenCode Go token found. Run: opencode auth login", "en"), "no token")
   assert.equal(shortErrorLabel("Нет токена OpenCode Go. Выполни...", "ru"), "нет токена")
   assert.equal(shortErrorLabel("HTTP 401: Unauthorized", "en"), "auth error")
@@ -439,7 +439,7 @@ test("shortErrorLabel, relativeAge, displayPercent, and accountKey work as expec
 })
 
 test("selectSnapshotsForClient preserves 15m-4h anchor snapshots during rapid bursts", async () => {
-  const { selectSnapshotsForClient } = await import("./model.ts")
+  const { selectSnapshotsForClient } = await import("./index.ts")
   const now = 1_700_000_000_000
   const history = [
     { at: now - 90 * 60_000, rolling: 10 },
@@ -459,7 +459,7 @@ test("selectSnapshotsForClient preserves 15m-4h anchor snapshots during rapid bu
 })
 
 test("summarizeStatsByProvider extracts topModels and formatTuiSidebar shows remaining % and exhausted reset countdown", async () => {
-  const { formatTuiSidebar, summarizeStatsByProvider } = await import("./model.ts")
+  const { formatTuiSidebar, summarizeStatsByProvider } = await import("./index.ts")
   const summary = summarizeStatsByProvider([
     { model: { providerID: "opencode-go", modelID: "claude-sonnet" }, steps: 12, cost: 0, tokens: { input: 80_000, output: 18_000, reasoning: 0 } },
     { model: { providerID: "opencode-go", modelID: "gemini-pro" }, steps: 5, cost: 0, tokens: { input: 40_000, output: 4_000, reasoning: 0 } },
@@ -501,7 +501,7 @@ test("selectStripRows tightest mode, shouldHideStrip, 12h shortDate, nextResetDe
     selectStripRows,
     shortDate,
     shouldHideStrip,
-  } = await import("./model.ts")
+  } = await import("./index.ts")
 
   const now = Date.parse("2026-11-19T15:30:00Z")
   const rows = [

@@ -1,5 +1,5 @@
 import { Schema } from "effect"
-import type { LimitCard, ProviderActivitySummary, StripMode, TimeFormat } from "../model.ts"
+import type { LimitCard, ProviderActivitySummary, StripMode, TimeFormat } from "../core/index.ts"
 
 export const CONSOLE_URL = "https://opencode.ai/console"
 

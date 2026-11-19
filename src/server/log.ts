@@ -1,7 +1,7 @@
 import os from "node:os"
 import path from "node:path"
 import { appendFile, rename, stat } from "node:fs/promises"
-import { redactSecrets } from "./model.ts"
+import { redactSecrets } from "../core/index.ts"
 
 const FILE = path.join(os.tmpdir(), "opencode-limits-go.log")
 const MAX = 256 * 1024

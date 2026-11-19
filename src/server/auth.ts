@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
-import { errorText } from "./model.ts"
+import { errorText } from "../core/index.ts"
 import { log } from "./log.ts"
 
 const exec = promisify(execFile)

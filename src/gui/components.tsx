@@ -14,7 +14,7 @@ import {
   span,
   windowElapsedRatio,
   windowLabel,
-} from "../model.ts"
+} from "../core/index.ts"
 import type { BarPalette, StripDensity, StripResetMode } from "./stores.ts"
 
 export function amberText(light: boolean): string {

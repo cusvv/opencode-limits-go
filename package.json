@@ -36,7 +36,7 @@
   ],
   "scripts": {
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.gui.json",
-    "test": "node --experimental-strip-types --test src/*.test.ts",
+    "test": "node --experimental-strip-types --test src/core/*.test.ts src/server/*.test.ts",
     "build": "npm run typecheck && vite build"
   },
   "devDependencies": {

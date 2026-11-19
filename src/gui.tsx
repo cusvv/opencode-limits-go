@@ -58,7 +58,7 @@ import {
   summarizeStatsByProvider,
   windowElapsedRatio,
   windowLabel,
-} from "./model.ts"
+} from "./core/index.ts"
 
 type I18nKey = keyof (typeof GUI_I18N)["en"]
 

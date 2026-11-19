@@ -4,7 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
-import { errorText, isNewerVersion } from "./model.ts"
+import { errorText, isNewerVersion } from "../core/index.ts"
 import { log } from "./log.ts"
 
 const exec = promisify(execFile)
@@ -65,7 +65,7 @@ export type UpdaterDeps = {
 }
 
 export function defaultPluginRoot(): string {
-  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..")
 }
 
 export function isTrustedGitHubUrl(rawUrl: string): boolean {

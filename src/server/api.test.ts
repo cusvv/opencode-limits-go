@@ -1,7 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { HttpError, fetchUsage, isRetryableFetchError } from "./api.ts"
-import { CodedError } from "./model.ts"
+import { CodedError } from "../core/index.ts"
 
 test("isRetryableFetchError classifies HTTP status codes and error types", () => {
   assert.equal(isRetryableFetchError(new HttpError(500)), true)
