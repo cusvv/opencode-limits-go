@@ -26,14 +26,14 @@ export function tone(
   opts?: { palette?: BarPalette; mono?: boolean; light?: boolean; warnAt?: number },
 ): string {
   const palette: BarPalette = opts?.palette ?? (opts?.mono ? "mono" : "traffic")
-  const neutral = opts?.light ? "rgba(0,0,0,.45)" : "rgba(255,255,255,.58)"
-  if (used >= 100) return "#ef4444"
+  const neutral = opts?.light ? "rgba(0,0,0,.55)" : "rgba(255,255,255,.58)"
+  if (used >= 100) return opts?.light ? "#dc2626" : "#ef4444"
   if (palette === "stealth") return neutral
   const warn = opts?.warnAt ?? 80
-  if (warn > 0 && used >= warn) return "#f59e0b"
+  if (warn > 0 && used >= warn) return opts?.light ? "#b45309" : "#f59e0b"
   if (palette === "mono") return neutral
-  if (palette === "calm") return opts?.light ? "#2563eb" : "#3b82f6"
-  return "#22c55e"
+  if (palette === "calm") return opts?.light ? "#1d4ed8" : "#3b82f6"
+  return opts?.light ? "#15803d" : "#22c55e"
 }
 
 export function MiniBar(props: {
@@ -46,7 +46,7 @@ export function MiniBar(props: {
   warnAt?: number
   elapsedRatio?: number | null
 }) {
-  const track = () => (props.light ? "rgba(0,0,0,.14)" : "rgba(255,255,255,.16)")
+  const track = () => (props.light ? "rgba(0,0,0,.2)" : "rgba(255,255,255,.16)")
   const widthPct = () => Math.min(Math.max(props.used, 0), 100)
   const tickColor = () => (props.light ? "rgba(0,0,0,.55)" : "rgba(255,255,255,.75)")
   const tickPct = () => {
@@ -103,6 +103,8 @@ export function Sparkline(props: {
           <svg
             viewBox={`0 0 ${width} ${height}`}
             preserveAspectRatio="none"
+            role="img"
+            aria-label={`${props.label}: ${d().min}% to ${d().max}%`}
             style="width:100%;height:26px;display:block;overflow:visible;"
           >
             <polygon points={d().area} fill={strokeColor()} fill-opacity="0.14" />
@@ -125,7 +127,7 @@ export function SectionDivider(props: { label: string; light: boolean }) {
   const border = () => (props.light ? "rgba(0,0,0,.08)" : "rgba(255,255,255,.08)")
   return (
     <div
-      style={`font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;opacity:.5;padding-top:6px;margin-top:2px;border-top:1px solid ${border()};`}
+      style={`font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;opacity:.62;padding-top:6px;margin-top:2px;border-top:1px solid ${border()};`}
     >
       {props.label}
     </div>
@@ -168,6 +170,20 @@ export function LimitsStrip(props: {
   const effPercent = () => props.showPercent || !effBars()
   const prefix = () => (props.lang === "ru" ? "лимиты" : "limits")
   const metrics = () => DENSITY_METRICS[props.density ?? "normal"]
+  const ariaLabel = () => {
+    const base = props.lang === "ru" ? "Лимиты OpenCode Go" : "OpenCode Go limits"
+    if (!props.card?.ok) {
+      return `${base}: ${props.ready ? shortErrorLabel(props.card?.error, props.lang) : "…"}`
+    }
+    const summary = rows()
+      .map((row) => {
+        const pct = displayPercent(row.used, props.showRemaining)
+        const reset = row.resetsAtMs ? `, ${span(row.resetsAtMs - (props.card?.checkedAtMs || Date.now()), props.lang)}` : ""
+        return `${windowLabel(row, props.lang)} ${pct}%${props.showRemaining ? " left" : ""}${reset}`
+      })
+      .join("; ")
+    return `${base}: ${summary}. ${props.lang === "ru" ? "Открыть подробности" : "Open details"}`
+  }
 
   const buttonStyle = () => {
     const m = metrics()
@@ -182,7 +198,7 @@ export function LimitsStrip(props: {
   }
 
   return (
-    <button type="button" onClick={props.onOpen} style={buttonStyle()}>
+    <button type="button" aria-label={ariaLabel()} onClick={props.onOpen} style={buttonStyle()}>
       <Show
         when={props.card?.ok}
         fallback={

@@ -27,6 +27,7 @@ export type ZenActivityInfo = {
   usageUrl?: string
   budgets: ConsoleBudget[]
   today: ProviderActivitySummary
+  week: ProviderActivitySummary
 }
 
 export const PLACEMENTS = ["bottom", "top", "both", "titlebar", "hidden"] as const

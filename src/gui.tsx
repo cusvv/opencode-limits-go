@@ -31,6 +31,7 @@ import {
   type Locale,
   type VisibleWindows,
   type WindowKey,
+  accountKey,
   alertMessage,
   burnSpikeMessage,
   cardText,
@@ -40,6 +41,7 @@ import {
   estimateWindowPace,
   formatTokensCompact,
   formatUsd,
+  isAuthError,
   newAlerts,
   normalizeLocale,
   paceSummary,
@@ -58,6 +60,7 @@ import {
   summarizeStatsByProvider,
   windowElapsedRatio,
   windowLabel,
+  windowVerdict,
 } from "./core/index.ts"
 
 type I18nKey = keyof (typeof GUI_I18N)["en"]
@@ -126,10 +129,13 @@ export default Plugin.define({
     const [updateBusy, setUpdateBusy] = createSignal(false)
     const notified = new Map<string, number>()
     const wasExhausted = new Set<string>()
+    const riskNotified = new Map<string, string>()
     let notifiedUpdateVersion = ""
     let lastFocusRefreshAt = 0
     let lastSpikeAlertAt = 0
     let hiddenPollSkip = 0
+    let currentAccount = ""
+    let statusInflight = false
 
     const lang = (): Locale => {
       const ov = custom.value.langOverride
@@ -167,7 +173,11 @@ export default Plugin.define({
       Number(strip.value.show5h) + Number(strip.value.show1w) + Number(strip.value.show1m)
 
     function pushSharedPrefs(patch: Record<string, unknown>) {
-      void ctx.client.rpc(Limits).setPrefs(patch, { signal: ctx.signal }).catch(() => {})
+      void ctx.client.rpc(Limits).setPrefs(patch, { signal: ctx.signal }).catch(() => {
+        if (ctx.signal.aborted) return
+        ctx.toast.show({ variant: "error", title: t("settings.sharedFailed") })
+        void pullSharedPrefs()
+      })
     }
 
     async function pullSharedPrefs() {
@@ -177,6 +187,7 @@ export default Plugin.define({
           weekly?: boolean
           monthly?: boolean
           showRemaining?: boolean
+          alerts?: boolean
           warnThreshold?: number
           burnSpikePct?: number
           langOverride?: string
@@ -196,6 +207,11 @@ export default Plugin.define({
         if (typeof shared.showRemaining === "boolean") {
           display.update((d) => {
             d.showRemaining = shared.showRemaining!
+          })
+        }
+        if (typeof shared.alerts === "boolean") {
+          prefs.update((d) => {
+            d.alerts = shared.alerts!
           })
         }
         if (typeof shared.warnThreshold === "number") {
@@ -218,7 +234,10 @@ export default Plugin.define({
 
     function toggleWindow(key: WindowKey) {
       const v = visibleWindows()
-      if (v[key] && activeWindowCount() <= 1) return
+      if (v[key] && activeWindowCount() <= 1) {
+        ctx.toast.show({ variant: "default", title: t("settings.windows.last") })
+        return
+      }
       const next = { ...v, [key]: !v[key] }
       strip.update((draft) => {
         draft.show5h = next.rolling
@@ -293,7 +312,14 @@ export default Plugin.define({
       }
     }
 
-    function resetSettings() {
+    async function resetSettings() {
+      const confirmed = await ctx.dialogs.confirm({
+        title: t("settings.resetConfirm.title"),
+        description: t("settings.resetConfirm.description"),
+        confirm: t("settings.reset"),
+        danger: true,
+      })
+      if (!confirmed || ctx.signal.aborted) return
       prefs.set({ placement: "bottom", showBars: true, alerts: true, autoUpdate: true })
       strip.set({ show5h: true, show1w: true, show1m: true, showPercent: true, showLabels: true })
       extras.set({ monoBars: false, showZenStats: true, warnThreshold: 80, pollSeconds: 90 })
@@ -324,6 +350,8 @@ export default Plugin.define({
         burnSpikePct: 20,
         langOverride: "auto",
       })
+      pushSharedPrefs({ alerts: true })
+      ctx.toast.show({ variant: "success", title: t("settings.resetDone") })
     }
 
     async function copyText(value: string) {
@@ -368,6 +396,10 @@ export default Plugin.define({
         })
         .join(" · ")
       const pace = paceSummary(c.rows, now, l, c.snapshots)
+      const risk = c.rows
+        .map((row) => windowVerdict(row, now, l, c.snapshots))
+        .filter((v): v is NonNullable<typeof v> => v !== null && v.kind !== "fits")
+        .map((v) => v.text)
       const z = extras.value.showZenStats ? zenActivity() : null
       const zenLine =
         z && z.today.zenCostUsd > 0
@@ -376,7 +408,7 @@ export default Plugin.define({
             ? `${t("limits.todayGo")}: ${formatTokensCompact(z.today.goTokens)}`
             : ""
       const stale = staleError() ? t("limits.stale", { error: staleError() }) : ""
-      return [base, rowsText, pace?.text, zenLine, stale].filter(Boolean).join("\n")
+      return [base, rowsText, ...risk, pace?.text, zenLine, stale].filter(Boolean).join("\n")
     }
 
     const placementOptions = () => [
@@ -424,9 +456,11 @@ export default Plugin.define({
 
         const start = new Date()
         start.setHours(0, 0, 0, 0)
-        const [limitsRes, statsRes] = await Promise.all([
+        const weekStart = Date.now() - 7 * 86_400_000
+        const [limitsRes, statsRes, weekRes] = await Promise.all([
           exp?.usage?.limits?.(undefined, { signal: ctx.signal }).catch(() => null),
           exp?.session?.stats?.({ from: start.getTime() }, { signal: ctx.signal }).catch(() => null),
+          exp?.session?.stats?.({ from: weekStart }, { signal: ctx.signal }).catch(() => null),
         ])
         if (ctx.signal.aborted) return
         const budgets: ConsoleBudget[] = Array.isArray(limitsRes?.data?.budgets)
@@ -443,24 +477,35 @@ export default Plugin.define({
               }))
           : []
         const today = summarizeStatsByProvider(statsRes?.models)
+        const week = summarizeStatsByProvider(weekRes?.models)
         const usageUrl =
           typeof limitsRes?.data?.workspace?.usageURL === "string" &&
           limitsRes.data.workspace.usageURL.startsWith("https://")
             ? limitsRes.data.workspace.usageURL
             : undefined
-        setZenActivity({ usageUrl, budgets, today })
+        setZenActivity({ usageUrl, budgets, today, week })
       } catch {}
+    }
+
+    function notify(title: string, variant: "default" | "success" | "error"): void {
+      ctx.toast.show({ variant, title })
+      void ctx.attention
+        ?.notify({ title, variant: variant === "error" ? "error" : "default" })
+        .catch(() => {})
     }
 
     async function refresh(force = false): Promise<LimitCard | null> {
       if (ctx.signal.aborted) return null
+      if (statusInflight) return card()
+      statusInflight = true
       if (force) setRefreshing(true)
       try {
         const currentLang = lang()
         const maxAgeMs = extras.value.pollSeconds * 1000
+        const signal = AbortSignal.any([ctx.signal, AbortSignal.timeout(30_000)])
         const result = (await ctx.client
           .rpc(Limits)
-          .status({ force, lang: currentLang, maxAgeMs }, { signal: ctx.signal })) as LimitCard
+          .status({ force, lang: currentLang, maxAgeMs }, { signal })) as LimitCard
         if (ctx.signal.aborted) return null
         setReady(true)
         if (result.ok) {
@@ -468,29 +513,38 @@ export default Plugin.define({
           if (!result.stale) setStaleError("")
           void loadZenActivity()
           const now = Date.now()
+          const acct = accountKey(result.org, result.email, result.source)
+          const changedAccount = !!currentAccount && currentAccount !== acct
+          if (changedAccount) {
+            notified.clear()
+            wasExhausted.clear()
+            riskNotified.clear()
+            lastSpikeAlertAt = 0
+          }
+          currentAccount = acct
           const triggered = newAlerts(result.rows, notified, extras.value.warnThreshold)
           const recovered = recoveredAlerts(result.rows, wasExhausted)
           if (prefs.value.alerts && !result.stale) {
             for (const row of triggered) {
-              ctx.toast.show({
-                variant: row.used >= 100 ? "error" : "default",
-                title: alertMessage(row, now, currentLang),
-              })
+              notify(alertMessage(row, now, currentLang), row.used >= 100 ? "error" : "default")
             }
             for (const row of recovered) {
-              ctx.toast.show({
-                variant: "success",
-                title: resetAlertMessage(row, currentLang),
-              })
+              notify(resetAlertMessage(row, currentLang), "success")
+            }
+            for (const row of result.rows) {
+              const verdict = windowVerdict(row, now, currentLang, result.snapshots)
+              if (!verdict || verdict.kind === "fits") continue
+              const id = row.key ?? row.label
+              const signature = String(row.resetsAtMs ?? 0)
+              if (riskNotified.get(id) === signature) continue
+              riskNotified.set(id, signature)
+              notify(verdict.text, verdict.kind === "exhausted" ? "error" : "default")
             }
             if (custom.value.burnSpikePct > 0 && now - lastSpikeAlertAt > 30 * 60_000) {
               const spike = detectBurnSpike(result.rows, result.snapshots, custom.value.burnSpikePct, now)
               if (spike) {
                 lastSpikeAlertAt = now
-                ctx.toast.show({
-                  variant: "default",
-                  title: burnSpikeMessage(spike, currentLang),
-                })
+                notify(burnSpikeMessage(spike, currentLang), "default")
               }
             }
           }
@@ -511,6 +565,7 @@ export default Plugin.define({
         }
         return null
       } finally {
+        statusInflight = false
         if (force && !ctx.signal.aborted) setRefreshing(false)
       }
     }
@@ -891,6 +946,21 @@ export default Plugin.define({
               }}
             />
           </SettingField>
+          <Show when={props.compact}>
+            <SettingField
+              page={props.page}
+              id="opencode-limits-go-palette"
+              title={t("settings.palette.title")}
+              description={t("settings.palette.description")}
+            >
+              <ui.Select<BarPalette>
+                label={t("settings.palette.title")}
+                options={paletteOptions()}
+                value={effectivePalette()}
+                onChange={setPalette}
+              />
+            </SettingField>
+          </Show>
           <Show when={!props.compact}>
             <SettingField
               page={props.page}
@@ -1156,11 +1226,12 @@ export default Plugin.define({
               label={t("settings.alerts.title")}
               hideLabel
               checked={prefs.value.alerts}
-              onChange={(checked) =>
+              onChange={(checked) => {
                 prefs.update((draft) => {
                   draft.alerts = checked
                 })
-              }
+                pushSharedPrefs({ alerts: checked })
+              }}
             />
           </SettingField>
           <SettingField
@@ -1207,7 +1278,7 @@ export default Plugin.define({
       )
     }
 
-    function BehaviorFields(props: { page?: boolean }) {
+    function BehaviorFields(props: { page?: boolean; compact?: boolean }) {
       const langOptions = () => [
         { value: "auto" as const, label: t("settings.lang.auto") },
         { value: "en" as const, label: t("settings.lang.en") },
@@ -1238,33 +1309,35 @@ export default Plugin.define({
               }}
             />
           </SettingField>
-          <SettingField
-            page={props.page}
-            id="opencode-limits-go-poll"
-            title={t("settings.poll.title")}
-            description={t("settings.poll.description")}
-          >
-            <ui.Select<string>
-              label={t("settings.poll.title")}
-              options={pollOptions()}
-              value={String(extras.value.pollSeconds)}
-              onChange={(value) =>
-                extras.update((draft) => {
-                  draft.pollSeconds = Number(value)
-                })
-              }
-            />
-          </SettingField>
-          <SettingField
-            page={props.page}
-            id="opencode-limits-go-diagnostics"
-            title={t("settings.diagnostics.title")}
-            description={t("settings.diagnostics.description")}
-          >
-            <ui.Button variant="neutral" size="small" icon="copy" onClick={copyDiagnostics}>
-              {t("settings.diagnostics.copy")}
-            </ui.Button>
-          </SettingField>
+          <Show when={!props.compact}>
+            <SettingField
+              page={props.page}
+              id="opencode-limits-go-poll"
+              title={t("settings.poll.title")}
+              description={t("settings.poll.description")}
+            >
+              <ui.Select<string>
+                label={t("settings.poll.title")}
+                options={pollOptions()}
+                value={String(extras.value.pollSeconds)}
+                onChange={(value) =>
+                  extras.update((draft) => {
+                    draft.pollSeconds = Number(value)
+                  })
+                }
+              />
+            </SettingField>
+            <SettingField
+              page={props.page}
+              id="opencode-limits-go-diagnostics"
+              title={t("settings.diagnostics.title")}
+              description={t("settings.diagnostics.description")}
+            >
+              <ui.Button variant="neutral" size="small" icon="copy" onClick={copyDiagnostics}>
+                {t("settings.diagnostics.copy")}
+              </ui.Button>
+            </SettingField>
+          </Show>
         </>
       )
     }
@@ -1275,6 +1348,9 @@ export default Plugin.define({
       if (info.restartRequired) return t("settings.version.restart", { version: info.latestVersion })
       if (info.error) return t("settings.version.error", { version: info.currentVersion, error: info.error })
       if (info.updateAvailable) {
+        if (info.managedByDev) {
+          return t("settings.version.dev", { current: info.currentVersion, latest: info.latestVersion })
+        }
         if (info.managedByPackageManager) {
           return t("settings.version.managed", { current: info.currentVersion, latest: info.latestVersion })
         }
@@ -1284,7 +1360,7 @@ export default Plugin.define({
     }
 
     function UpdateFields(props: { page?: boolean }) {
-      const isManaged = () => !!updateInfo()?.managedByPackageManager
+      const isManaged = () => !!updateInfo()?.managedByPackageManager || !!updateInfo()?.managedByDev
       const canInstall = () =>
         !!updateInfo()?.updateAvailable && !updateInfo()?.restartRequired && !isManaged()
       return (
@@ -1296,9 +1372,11 @@ export default Plugin.define({
                 page={props.page}
                 id="opencode-limits-go-autoupdate"
                 title={t("settings.autoUpdate.title")}
-                description={t("settings.autoUpdate.managed")}
+                description={
+                  updateInfo()?.managedByDev ? t("settings.autoUpdate.dev") : t("settings.autoUpdate.managed")
+                }
               >
-                <span style="font-size:11px;opacity:.55;">CLI</span>
+                <span style="font-size:11px;opacity:.55;">{updateInfo()?.managedByDev ? "git" : "CLI"}</span>
               </SettingField>
             }
           >
@@ -1376,11 +1454,11 @@ export default Plugin.define({
                 >
                   {t("settings.openAll")}
                 </ui.Button>
-                <ui.Button variant="ghost-muted" size="small" onClick={resetSettings}>
+                <ui.Button variant="ghost-muted" size="small" onClick={() => void resetSettings()}>
                   {t("settings.reset")}
                 </ui.Button>
               </div>
-              <ui.Button variant="contrast" autofocus onClick={dialog.close}>
+              <ui.Button variant="contrast" onClick={dialog.close}>
                 {t("settings.done")}
               </ui.Button>
             </div>
@@ -1388,6 +1466,8 @@ export default Plugin.define({
         >
           <div style="display:flex;flex-direction:column;gap:10px;width:100%;box-sizing:border-box;">
             <StripFields compact />
+            <SectionDivider label={t("settings.section.behavior")} light={light()} />
+            <BehaviorFields compact />
             <SectionDivider label={t("settings.section.notifications")} light={light()} />
             <NotificationFields compact />
           </div>
@@ -1407,6 +1487,10 @@ export default Plugin.define({
           } else {
             setErr(next?.error || t("limits.failed"))
           }
+        }
+        const showAuthHint = () => {
+          const raw = err().toLowerCase()
+          return isAuthError(raw) || raw.includes("no_token") || raw.includes("no token") || raw.includes("нет токена")
         }
         return (
           <ui.Dialog
@@ -1455,10 +1539,12 @@ export default Plugin.define({
             }
           >
             <div style="display:flex;flex-direction:column;gap:8px;max-width:460px;font-size:12px;">
-              <div style="padding:8px 10px;border-radius:8px;border:1px solid rgba(239,68,68,.35);background:rgba(239,68,68,.08);color:#ef4444;word-break:break-word;">
+              <div style={`padding:8px 10px;border-radius:8px;border:1px solid rgba(239,68,68,.35);background:rgba(239,68,68,.08);color:${light() ? "#dc2626" : "#ef4444"};word-break:break-word;`}>
                 {err()}
               </div>
-              <div style="font-size:11px;opacity:.75;">{t("limits.errorAuthHint")}</div>
+              <Show when={showAuthHint()}>
+                <div style="font-size:11px;opacity:.75;">{t("limits.errorAuthHint")}</div>
+              </Show>
             </div>
           </ui.Dialog>
         )
@@ -1512,6 +1598,13 @@ export default Plugin.define({
           const bg = light() ? "rgba(0,0,0,.025)" : "rgba(255,255,255,.025)"
           return `display:flex;flex-direction:column;gap:5px;padding:8px 10px;border-radius:8px;border:1px solid ${border};background:${bg};font-size:11px;`
         }
+        const zenLeft = () => {
+          const z = zenActivity()
+          if (!z?.budgets.length) return ""
+          const left = z.budgets.reduce((sum, budget) => sum + Math.max(0, budget.limit - budget.spent), 0)
+          return left > 0 ? t("limits.zenLeft", { amount: formatUsd(left) }) : ""
+        }
+        const showZenLeft = () => !!zenLeft() && (hasExhausted() || pace()?.kind === "hot")
         const hasZenDetails = () => {
           if (!extras.value.showZenStats) return false
           const z = zenActivity()
@@ -1521,7 +1614,10 @@ export default Plugin.define({
             z.today.goTokens > 0 ||
             z.today.zenTokens > 0 ||
             z.today.zenCostUsd > 0 ||
-            z.today.topModels.length > 0
+            z.today.topModels.length > 0 ||
+            z.week.goTokens > 0 ||
+            z.week.zenTokens > 0 ||
+            z.week.zenCostUsd > 0
           )
         }
 
@@ -1597,6 +1693,7 @@ export default Plugin.define({
                       : `${t("limits.reset")} ${dateStr} · ${t("limits.in")} ${r.text}`
                   }
                   const rowPace = () => estimateWindowPace(row, now(), lang(), current().snapshots)
+                  const verdict = () => windowVerdict(row, now(), lang(), current().snapshots)
                   const elapsed = () => windowElapsedRatio(row, now())
                   const deltaTooltip = () =>
                     row.deltaSpanMs && row.deltaSpanMs > 0
@@ -1607,11 +1704,13 @@ export default Plugin.define({
                       <ui.Tooltip value={t("limits.toggleRowHint")}>
                         <button
                           type="button"
+                          aria-pressed={isVisibleOnStrip()}
+                          aria-label={`${windowLabel(row, lang())}: ${isVisibleOnStrip() ? t("limits.hideOnStrip") : t("limits.showOnStrip")}`}
                           onClick={() => {
                             const k = key()
                             if (k) toggleWindow(k)
                           }}
-                          style={`width:26px;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;flex-shrink:0;opacity:${isVisibleOnStrip() ? ".85" : ".35"};`}
+                          style={`min-width:32px;min-height:24px;padding:0 2px;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;flex-shrink:0;opacity:${isVisibleOnStrip() ? ".85" : ".35"};`}
                         >
                           {windowLabel(row, lang())}
                         </button>
@@ -1631,9 +1730,10 @@ export default Plugin.define({
                       <span style="width:42px;text-align:right;font-variant-numeric:tabular-nums;flex-shrink:0;">
                         {displayPercent(row.used, display.value.showRemaining)}%
                       </span>
-                      <span style="opacity:.6;font-size:11px;min-width:0;flex:1;">
+                      <span style="opacity:.7;font-size:11px;min-width:0;flex:1;">
                         {resetLine()}
-                        {row.status !== "ok" ? ` · ${row.status}` : ""}
+                        {row.status === "limited" ? ` · ${t("limits.limited")}` : row.status !== "ok" ? ` · ${row.status}` : ""}
+                        {verdict() && verdict()!.kind !== "fits" ? ` · ${verdict()!.text}` : ""}
                       </span>
                       <Show when={row.delta1h && row.delta1h > 0}>
                         <ui.Tooltip value={deltaTooltip()}>
@@ -1645,6 +1745,8 @@ export default Plugin.define({
                       <Show when={rowPace()?.kind === "hot"}>
                         <ui.Tooltip value={t("limits.paceHint")}>
                           <span
+                            tabIndex={0}
+                            aria-label={t("limits.paceHint")}
                             style={`font-size:11px;color:${amberText(light())};font-variant-numeric:tabular-nums;flex-shrink:0;`}
                           >
                             ⚡
@@ -1656,7 +1758,10 @@ export default Plugin.define({
                 }}
               </For>
               <Show when={custom.value.dialogPace && pace()}>
-                <div style={paceCardStyle()}>{pace()!.text}</div>
+                <div style={paceCardStyle()}>
+                  {pace()!.text}
+                  <Show when={showZenLeft()}> · {zenLeft()}</Show>
+                </div>
               </Show>
               <Show when={custom.value.dialogSparkline}>
                 <Sparkline
@@ -1700,8 +1805,31 @@ export default Plugin.define({
                       </Show>
                     </div>
                   </Show>
+                  <Show
+                    when={
+                      (zenActivity()?.week.goTokens ?? 0) > 0 ||
+                      (zenActivity()?.week.zenTokens ?? 0) > 0 ||
+                      (zenActivity()?.week.zenCostUsd ?? 0) > 0
+                    }
+                  >
+                    <div style="opacity:.75;font-variant-numeric:tabular-nums;">
+                      {t("limits.week")}:
+                      <Show when={(zenActivity()?.week.goTokens ?? 0) > 0}>
+                        {" "}
+                        Go {formatTokensCompact(zenActivity()!.week.goTokens)}
+                      </Show>
+                      <Show when={(zenActivity()?.week.zenTokens ?? 0) > 0 || (zenActivity()?.week.zenCostUsd ?? 0) > 0}>
+                        {" "}
+                        · Zen {formatUsd(zenActivity()!.week.zenCostUsd)} ({formatTokensCompact(zenActivity()!.week.zenTokens)})
+                      </Show>
+                      <Show when={zenActivity()?.week.topModels[0]}>
+                        {" "}
+                        · {zenActivity()!.week.topModels[0].modelID}
+                      </Show>
+                    </div>
+                  </Show>
                   <Show when={(zenActivity()?.today.topModels.length ?? 0) > 0}>
-                    <div style="opacity:.65;font-size:10px;font-variant-numeric:tabular-nums;">
+                    <div style="opacity:.7;font-size:10px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;">
                       {t("limits.models")}:{" "}
                       {zenActivity()!
                         .today.topModels.map((m) => `${m.modelID} (${formatTokensCompact(m.tokens)})`)
@@ -1736,9 +1864,8 @@ export default Plugin.define({
                 </div>
               </Show>
               <Show when={custom.value.dialogSource && sourceLabel(current().source, lang())}>
-                <div style="font-size:10px;opacity:.45;display:flex;justify-content:space-between;gap:8px;">
+                <div style="font-size:11px;opacity:.62;">
                   <span>{sourceLabel(current().source, lang())}</span>
-                  <span>{current().checkedAt}</span>
                 </div>
               </Show>
             </div>
@@ -1848,6 +1975,102 @@ export default Plugin.define({
           keywords: "language locale english russian override",
         },
         {
+          id: "opencode-limits-go-windows",
+          title: t("settings.windows.title"),
+          description: t("settings.windows.description"),
+          keywords: "windows 5h 1w 1m strip show hide",
+        },
+        {
+          id: "opencode-limits-go-style",
+          title: t("settings.style.title"),
+          description: t("settings.style.description"),
+          keywords: "style bars text percent indicator",
+        },
+        {
+          id: "opencode-limits-go-stripreset",
+          title: t("settings.stripReset.title"),
+          description: t("settings.stripReset.description"),
+          keywords: "reset countdown timer strip",
+        },
+        {
+          id: "opencode-limits-go-labels",
+          title: t("settings.labels.title"),
+          description: t("settings.labels.description"),
+          keywords: "labels prefixes window names",
+        },
+        {
+          id: "opencode-limits-go-paceicon",
+          title: t("settings.paceIcon.title"),
+          description: t("settings.paceIcon.description"),
+          keywords: "pace icon lightning burn",
+        },
+        {
+          id: "opencode-limits-go-elapsedtick",
+          title: t("settings.elapsedTick.title"),
+          description: t("settings.elapsedTick.description"),
+          keywords: "elapsed marker tick time",
+        },
+        {
+          id: "opencode-limits-go-timeformat",
+          title: t("settings.timeFormat.title"),
+          description: t("settings.timeFormat.description"),
+          keywords: "time format 24h 12h clock",
+        },
+        {
+          id: "opencode-limits-go-resetformat",
+          title: t("settings.resetFormat.title"),
+          description: t("settings.resetFormat.description"),
+          keywords: "reset date countdown format",
+        },
+        {
+          id: "opencode-limits-go-dialogpace",
+          title: t("settings.dialogPace.title"),
+          description: t("settings.dialogPace.description"),
+          keywords: "pace banner dialog projection",
+        },
+        {
+          id: "opencode-limits-go-zenstats",
+          title: t("settings.zenStats.title"),
+          description: t("settings.zenStats.description"),
+          keywords: "zen stats spend models budgets",
+        },
+        {
+          id: "opencode-limits-go-dialogsource",
+          title: t("settings.dialogSource.title"),
+          description: t("settings.dialogSource.description"),
+          keywords: "source auth footer credential",
+        },
+        {
+          id: "opencode-limits-go-alerts",
+          title: t("settings.alerts.title"),
+          description: t("settings.alerts.description"),
+          keywords: "alerts notifications toast mute",
+        },
+        {
+          id: "opencode-limits-go-threshold",
+          title: t("settings.threshold.title"),
+          description: t("settings.threshold.description"),
+          keywords: "warning threshold alert percent",
+        },
+        {
+          id: "opencode-limits-go-poll",
+          title: t("settings.poll.title"),
+          description: t("settings.poll.description"),
+          keywords: "poll interval refresh background",
+        },
+        {
+          id: "opencode-limits-go-autoupdate",
+          title: t("settings.autoUpdate.title"),
+          description: t("settings.autoUpdate.description"),
+          keywords: "auto update github release",
+        },
+        {
+          id: "opencode-limits-go-diagnostics",
+          title: t("settings.diagnostics.title"),
+          description: t("settings.diagnostics.description"),
+          keywords: "diagnostics copy info support",
+        },
+        {
           id: "opencode-limits-go-version",
           title: t("settings.version.title"),
           keywords: "version check update",
@@ -1859,7 +2082,7 @@ export default Plugin.define({
           description={t("settings.description")}
           actions={
             <div style="display:flex;align-items:center;gap:8px;">
-              <ui.Button variant="ghost-muted" onClick={resetSettings}>
+              <ui.Button variant="ghost-muted" onClick={() => void resetSettings()}>
                 {t("settings.reset")}
               </ui.Button>
               <ui.Button

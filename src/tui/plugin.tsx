@@ -327,7 +327,7 @@ export default Plugin.define({
           return
         }
         if (res.managedByDev) {
-          notify("Development install: update with git pull", "info")
+          notify(c.updateDev, "info")
           return
         }
         const installed = (await ctx.client.rpc(Limits).installUpdate({}, { signal: stopCtrl.signal })) as {
