@@ -46,7 +46,7 @@ TUI is intentionally one line in the sidebar:
 
 ### Alerts that reach you
 - Threshold toasts (`70%` / `80%` / `90%` / `100%`), quota-reset recovery toasts, fast-burn spike alerts, and **"won't survive until reset"** warnings.
-- **System notifications** when the app is not focused, using OpenCode's own notification rules and sound settings.
+- **System notifications** when the app is not focused — **off by default**, opt-in, and only for 100% quota (max once per 10 minutes). In-app toasts remain separate.
 - Alerts are deduplicated per account/window/reset, persisted in TUI storage across `/reload`, and never fire on stale disk-cache data.
 
 ### Deep customization
@@ -166,6 +166,7 @@ The TUI keybind can be rebound in OpenCode's keymap; `/limits` always works.
 | TUI strip | All three windows, text only, visible |
 | Poll interval | 90s (3× slower when Desktop is minimized) |
 | Alert threshold | 80% and 100% |
+| System notifications | Off; when enabled, 100% only, max once per 10 min |
 | Fast-burn spike | +20% in 5–30 min |
 | Auto-update | On for release installs; ignored for git/`local-plugins` installs |
 | Language | Follow OpenCode UI (TUI falls back to `OPENCODE_LANG`/`LC_ALL`/`LANG`) |

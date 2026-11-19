@@ -22,7 +22,7 @@ OpenCode v2.3+ plugin that shows OpenCode Go quota usage (5h / 1w / 1m) in the D
 ### Alerts
 - Alert state is persisted in TUI storage and keyed by account + window; account changes clear it.
 - Alerts never fire from `stale` disk cache.
-- Threshold, reset, spike, and risk alerts go to in-app toast and `ctx.attention.notify` (OpenCode decides whether the OS notification is shown).
+- Threshold, reset, spike, and risk alerts go to in-app toast only. OS notifications are opt-in (`systemNotifications=false` by default), limited to 100% quota, and rate-limited to one per 10 minutes.
 - Reset alert says the window reset and its current %, never that all Go quota is available.
 
 ### Shared preferences

@@ -76,6 +76,7 @@ export default Plugin.define({
       placement: "bottom",
       showBars: true,
       alerts: true,
+      systemNotifications: false,
       autoUpdate: true,
     }),
     strip: Store.global(StripPrefs, {
@@ -133,6 +134,7 @@ export default Plugin.define({
     let notifiedUpdateVersion = ""
     let lastFocusRefreshAt = 0
     let lastSpikeAlertAt = 0
+    let lastSystemNotifyAt = 0
     let hiddenPollSkip = 0
     let currentAccount = ""
     let statusInflight = false
@@ -188,6 +190,7 @@ export default Plugin.define({
           monthly?: boolean
           showRemaining?: boolean
           alerts?: boolean
+          systemNotifications?: boolean
           warnThreshold?: number
           burnSpikePct?: number
           langOverride?: string
@@ -212,6 +215,11 @@ export default Plugin.define({
         if (typeof shared.alerts === "boolean") {
           prefs.update((d) => {
             d.alerts = shared.alerts!
+          })
+        }
+        if (typeof shared.systemNotifications === "boolean") {
+          prefs.update((d) => {
+            d.systemNotifications = shared.systemNotifications!
           })
         }
         if (typeof shared.warnThreshold === "number") {
@@ -320,7 +328,7 @@ export default Plugin.define({
         danger: true,
       })
       if (!confirmed || ctx.signal.aborted) return
-      prefs.set({ placement: "bottom", showBars: true, alerts: true, autoUpdate: true })
+      prefs.set({ placement: "bottom", showBars: true, alerts: true, systemNotifications: false, autoUpdate: true })
       strip.set({ show5h: true, show1w: true, show1m: true, showPercent: true, showLabels: true })
       extras.set({ monoBars: false, showZenStats: true, warnThreshold: 80, pollSeconds: 90 })
       display.set({ showRemaining: false })
@@ -350,7 +358,7 @@ export default Plugin.define({
         burnSpikePct: 20,
         langOverride: "auto",
       })
-      pushSharedPrefs({ alerts: true })
+      pushSharedPrefs({ alerts: true, systemNotifications: false })
       ctx.toast.show({ variant: "success", title: t("settings.resetDone") })
     }
 
@@ -489,7 +497,12 @@ export default Plugin.define({
 
     function notify(title: string, variant: "default" | "success" | "error"): void {
       ctx.toast.show({ variant, title })
-      const pending = ctx.attention?.notify({ title, variant: variant === "error" ? "error" : "default" })
+      // OS notifications are opt-in and only for 100% quota, at most once per 10 minutes.
+      if (prefs.value.systemNotifications !== true || variant !== "error") return
+      const now = Date.now()
+      if (now - lastSystemNotifyAt < 10 * 60_000) return
+      lastSystemNotifyAt = now
+      const pending = ctx.attention?.notify({ title, variant: "error" })
       void pending?.catch(() => {})
     }
 
@@ -519,6 +532,7 @@ export default Plugin.define({
             wasExhausted.clear()
             riskNotified.clear()
             lastSpikeAlertAt = 0
+            lastSystemNotifyAt = 0
           }
           currentAccount = acct
           const triggered = newAlerts(result.rows, notified, extras.value.warnThreshold)
@@ -1233,6 +1247,24 @@ export default Plugin.define({
                   draft.alerts = checked
                 })
                 pushSharedPrefs({ alerts: checked })
+              }}
+            />
+          </SettingField>
+          <SettingField
+            page={props.page}
+            id="opencode-limits-go-systemnotify"
+            title={t("settings.systemNotify.title")}
+            description={t("settings.systemNotify.description")}
+          >
+            <ui.Switch
+              label={t("settings.systemNotify.title")}
+              hideLabel
+              checked={prefs.value.systemNotifications === true}
+              onChange={(checked) => {
+                prefs.update((draft) => {
+                  draft.systemNotifications = checked
+                })
+                pushSharedPrefs({ systemNotifications: checked })
               }}
             />
           </SettingField>
@@ -2060,6 +2092,12 @@ export default Plugin.define({
           title: t("settings.alerts.title"),
           description: t("settings.alerts.description"),
           keywords: "alerts notifications toast mute",
+        },
+        {
+          id: "opencode-limits-go-systemnotify",
+          title: t("settings.systemNotify.title"),
+          description: t("settings.systemNotify.description"),
+          keywords: "system notifications os desktop mute focus",
         },
         {
           id: "opencode-limits-go-threshold",

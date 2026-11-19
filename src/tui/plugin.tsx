@@ -36,6 +36,7 @@ type TuiPrefs = VisibleWindows & {
   burnSpikePct?: number
   langOverride?: string
   alerts?: boolean
+  systemNotifications?: boolean
   hidden?: boolean
   plain?: boolean
 }
@@ -68,6 +69,7 @@ export default Plugin.define({
         burnSpikePct: 20,
         langOverride: "auto",
         alerts: true,
+        systemNotifications: false,
         hidden: false,
         plain: false,
       },
@@ -90,10 +92,16 @@ export default Plugin.define({
     const [staleError, setStaleError] = createSignal("")
     const stopCtrl = new AbortController()
     let notifiedVersion = ""
+    let lastSystemNotifyAt = 0
     let refreshing = false
 
     function notify(message: string, variant: "info" | "warning" | "error"): void {
       ctx.ui.toast.show({ message, variant })
+      // OS notifications are opt-in and only for 100% quota, at most once per 10 minutes.
+      if (tuiPrefs.systemNotifications !== true || variant !== "error") return
+      const now = Date.now()
+      if (now - lastSystemNotifyAt < 10 * 60_000) return
+      lastSystemNotifyAt = now
       const pending = ctx.attention?.notify({
         title: copy().title,
         message,
@@ -115,6 +123,7 @@ export default Plugin.define({
           if (typeof shared.warnThreshold === "number") d.warnThreshold = shared.warnThreshold
           if (typeof shared.burnSpikePct === "number") d.burnSpikePct = shared.burnSpikePct
           if (typeof shared.alerts === "boolean") d.alerts = shared.alerts
+          if (typeof shared.systemNotifications === "boolean") d.systemNotifications = shared.systemNotifications
           if (shared.langOverride === "auto" || shared.langOverride === "en" || shared.langOverride === "ru") {
             d.langOverride = shared.langOverride
           }
@@ -137,6 +146,7 @@ export default Plugin.define({
       const wasExhausted = new Set<string>(changedAccount ? [] : alertState.exhausted)
       const risk = { ...(changedAccount ? {} : alertState.risk) }
       let lastSpikeAlertAt = changedAccount || !Number.isFinite(alertState.spikeAt) ? 0 : alertState.spikeAt
+      if (changedAccount) lastSystemNotifyAt = 0
 
       const triggered = newAlerts(result.rows, notified, warnAt())
       const recovered = recoveredAlerts(result.rows, wasExhausted)
@@ -510,6 +520,7 @@ export default Plugin.define({
                   { title: c.thresholdItem(warnAt()), value: "threshold" },
                   { title: c.spikeItem(spikeAt()), value: "spike" },
                   { title: c.toggleAlerts(alertsOn()), value: "alerts" },
+                  { title: c.toggleSystemNotify(tuiPrefs.systemNotifications === true), value: "system" },
                   { title: c.toggleHidden(tuiPrefs.hidden === true), value: "hidden" },
                   { title: c.togglePlain(tuiPrefs.plain === true), value: "plain" },
                   { title: c.languageItem(tuiPrefs.langOverride ?? "auto"), value: "lang" },
@@ -550,6 +561,12 @@ export default Plugin.define({
                   d.alerts = next
                 })
                 pushSharedPrefs({ alerts: next })
+              } else if (action === "system") {
+                const next = tuiPrefs.systemNotifications !== true
+                await setTuiPrefs((d) => {
+                  d.systemNotifications = next
+                })
+                pushSharedPrefs({ systemNotifications: next })
               } else if (action === "hidden") {
                 await setTuiPrefs((d) => {
                   d.hidden = !tuiPrefs.hidden

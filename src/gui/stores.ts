@@ -74,6 +74,7 @@ export const Prefs = Schema.Struct({
   placement: Schema.Literals(PLACEMENTS),
   showBars: Schema.Boolean,
   alerts: Schema.Boolean,
+  systemNotifications: Schema.optional(Schema.Boolean),
   autoUpdate: Schema.Boolean,
 })
 
