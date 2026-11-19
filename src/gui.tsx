@@ -1571,12 +1571,10 @@ export default Plugin.define({
         }
 
         const handleRefresh = async () => {
-          const next = await refresh(true)
+          await refresh(true)
           if (ctx.signal.aborted) return
           setNow(Date.now())
-          if (!next || !next.ok) {
-            ctx.toast.show({ variant: "error", title: next?.error ?? t("limits.failed") })
-          }
+          // A failed refresh is shown by the stale banner; a second toast would duplicate it.
         }
 
         const pace = () => paceSummary(current().rows, now(), lang(), current().snapshots)

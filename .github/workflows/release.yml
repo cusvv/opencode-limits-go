@@ -13,11 +13,11 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: "24"
-      - run: npm install --no-audit --no-fund
+      - run: npm ci
       - run: npm test
       - run: npm run build
 
@@ -44,27 +44,28 @@ jobs:
           tar -czf release-assets/opencode-limits-go.tar.gz -C "$STAGE_DIR" opencode-limits-go
           (cd "$STAGE_DIR" && zip -qr "$GITHUB_WORKSPACE/release-assets/opencode-limits-go.zip" opencode-limits-go)
           rm -rf "$STAGE_DIR"
+          (cd release-assets && sha256sum opencode-limits-go.tar.gz opencode-limits-go.zip > SHA256SUMS)
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" release-assets/opencode-limits-go.tar.gz release-assets/opencode-limits-go.zip --clobber
+            gh release upload "$GITHUB_REF_NAME" release-assets/opencode-limits-go.tar.gz release-assets/opencode-limits-go.zip release-assets/SHA256SUMS --clobber
           else
-            gh release create "$GITHUB_REF_NAME" release-assets/opencode-limits-go.tar.gz release-assets/opencode-limits-go.zip --title "$GITHUB_REF_NAME" --generate-notes
+            gh release create "$GITHUB_REF_NAME" release-assets/opencode-limits-go.tar.gz release-assets/opencode-limits-go.zip release-assets/SHA256SUMS --title "$GITHUB_REF_NAME" --generate-notes
           fi
 
   npm:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
-      - run: npm install --no-audit --no-fund
+      - run: npm ci
       - run: npm run build
       - name: Publish to npm (Trusted Publishing or NPM_TOKEN)
         env:

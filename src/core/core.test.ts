@@ -119,10 +119,13 @@ test("cardText, tightLine, alertMessage, cardDetail format cleanly in EN and RU"
   assert.doesNotMatch(detailRu, /сброс через сброс прошёл/)
 })
 
-test("errorText redacts Bearer and prefixed secrets", () => {
+test("errorText redacts Bearer, prefixed secrets, and JWTs", async () => {
+  const { redactSecrets } = await import("./index.ts")
   const msg = errorText(new Error("failed with Bearer sk-ant-secret123 and st_abcdef12345 and gho_secret999"))
   assert.doesNotMatch(msg, /secret123|abcdef12345|secret999/)
   assert.match(msg, /\[REDACTED\]/)
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123"
+  assert.doesNotMatch(redactSecrets(`token ${jwt}`), /eyJhbGci/)
 })
 
 test("newAlerts: alerts once per threshold crossing and again after a reset", () => {
@@ -396,6 +399,62 @@ test("formatTuiSidebar supports window filter, inline mini-bars, and hot pace in
   const detail = cardDetail(card, now, "en", ["Today: Go 142k tok · Zen $0.04"])
   assert.ok(detail.includes("+12%"))
   assert.ok(detail.includes("Today: Go 142k tok · Zen $0.04"))
+})
+
+test("tightest mode ranks by projected risk, not raw percent", async () => {
+  const { selectStripRows, windowVerdict } = await import("./index.ts")
+  const now = Date.now()
+  const rows = [
+    {
+      key: "rolling" as const,
+      label: "5h",
+      used: 92,
+      status: "ok",
+      resetsAt: "",
+      resetsAtMs: now + 20 * 60_000,
+      resetsIn: "",
+    },
+    {
+      key: "weekly" as const,
+      label: "1w",
+      used: 60,
+      status: "ok",
+      resetsAt: "",
+      resetsAtMs: now + 4 * 86_400_000,
+      resetsIn: "",
+    },
+  ]
+  const pick = selectStripRows(rows, { rolling: true, weekly: true, monthly: true }, "tightest", now)
+  assert.equal(pick[0].key, "weekly")
+  const verdict = windowVerdict(rows[1], now, "en")
+  assert.equal(verdict?.kind, "tight")
+})
+
+test("formatTuiSidebar uses remaining % for the bar and shows reset countdown above warning", async () => {
+  const { formatTuiSidebar } = await import("./index.ts")
+  const now = Date.now()
+  const card = {
+    ok: true as const,
+    org: "",
+    email: "",
+    checkedAt: "",
+    source: "",
+    tight: "",
+    error: "",
+    rows: [
+      {
+        key: "rolling" as const,
+        label: "5h",
+        used: 92,
+        status: "ok",
+        resetsAt: "",
+        resetsAtMs: now + 20 * 60_000,
+        resetsIn: "",
+      },
+    ],
+  }
+  const text = formatTuiSidebar(card, { rolling: true, weekly: false, monthly: false }, true, "en", now, true, 80)
+  assert.match(text, /5h ░░░░ 8% \(20m\)/)
 })
 
 test("recoveredAlerts detects drop from 100% and resetAlertMessage localizes cleanly", async () => {

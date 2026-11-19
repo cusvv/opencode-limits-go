@@ -10,6 +10,8 @@ import {
   findVerifiedPluginRoot,
   isPackageManagerInstall,
   isTrustedGitHubUrl,
+  parseChecksum,
+  pickChecksumAsset,
   pickReleaseDownload,
 } from "./updater.ts"
 
@@ -43,6 +45,22 @@ test("pickReleaseDownload prefers tar.gz asset, then zip asset, then tarball_url
     }),
     { url: "https://api.github.com/repos/cusvv/opencode-limits-go/tarball/v1.5.0", kind: "tar.gz" },
   )
+})
+
+test("checksum assets are required and parsed by archive name", () => {
+  const release = {
+    assets: [
+      { name: "SHA256SUMS", browser_download_url: "https://github.com/cusvv/opencode-limits-go/releases/download/v1.5.1/SHA256SUMS" },
+      { name: "opencode-limits-go.tar.gz", browser_download_url: "https://github.com/cusvv/opencode-limits-go/releases/download/v1.5.1/opencode-limits-go.tar.gz" },
+    ],
+  }
+  assert.equal(
+    pickChecksumAsset(release),
+    "https://github.com/cusvv/opencode-limits-go/releases/download/v1.5.1/SHA256SUMS",
+  )
+  const hash = "a".repeat(64)
+  assert.equal(parseChecksum(`${hash}  opencode-limits-go.tar.gz\n`, "opencode-limits-go.tar.gz"), hash)
+  assert.equal(parseChecksum(`${hash}  other.tar.gz\n`, "opencode-limits-go.tar.gz"), null)
 })
 
 test("findVerifiedPluginRoot and copyVerifiedPlugin stage and replace plugin files cleanly", async () => {
