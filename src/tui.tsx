@@ -10,11 +10,14 @@ import {
   cardDetail,
   emptyCard,
   errorText,
+  filterStripRows,
   formatTokensCompact,
   formatTuiSidebar,
   formatUsd,
   newAlerts,
   normalizeLocale,
+  recoveredAlerts,
+  resetAlertMessage,
   retry,
   span,
   summarizeStatsByProvider,
@@ -22,6 +25,7 @@ import {
 
 type TuiPrefs = VisibleWindows & {
   showBars?: boolean
+  showRemaining?: boolean
   warnThreshold?: number
 }
 
@@ -31,19 +35,26 @@ const COPY = {
     windowsTitle: "OpenCode Go limits: sidebar windows",
     settingsTitle: "OpenCode Go limits: TUI settings",
     allWindows: "All windows (5h · 1w · 1m)",
+    win5h1w: "5h · 1w",
+    win5h1m: "5h · 1m",
+    win1w1m: "1w · 1m",
     only5h: "Only 5h",
     only1w: "Only 1w",
     only1m: "Only 1m",
     toggleBars: (on: boolean) => `Sidebar mini-bars: ${on ? "ON" : "OFF"}`,
+    toggleRemaining: (on: boolean) => `Percentage mode: ${on ? "Remaining (% left)" : "Used (% spent)"}`,
     pickWindows: "Choose sidebar windows…",
     thresholdItem: (v: number) => `Alert threshold: ${v > 0 ? `${v}% / 100%` : "100% only"}`,
     checkUpdates: "Check for plugin updates…",
     upToDate: (v: string) => `opencode-limits-go v${v} is up to date.`,
-    updateAvail: (v: string, pm: boolean) =>
-      pm ? `v${v} available — run: opencode plugin update` : `v${v} available — run /reload after update`,
+    updateManaged: (v: string) => `v${v} available — run: opencode plugin update`,
+    updateInstallFailed: (err: string) => `Update failed: ${err}`,
     todayPrefix: "Today",
+    tokUnit: "tok",
+    modelsPrefix: "Models",
     budgetPrefix: "Budget",
     fallbackHint: "Go quota reached — switch to OpenCode Zen or a free model until reset.",
+    stalePrefix: "stale",
     loading: "limits: …",
     noServer: "cannot reach plugin server",
     failed: "Failed to load limits",
@@ -54,19 +65,26 @@ const COPY = {
     windowsTitle: "Лимиты OpenCode Go: окна в панели",
     settingsTitle: "Лимиты OpenCode Go: настройки TUI",
     allWindows: "Все окна (5ч · 1н · 1м)",
+    win5h1w: "5ч · 1н",
+    win5h1m: "5ч · 1м",
+    win1w1m: "1н · 1м",
     only5h: "Только 5ч",
     only1w: "Только 1н",
     only1m: "Только 1м",
     toggleBars: (on: boolean) => `Мини-бары в панели: ${on ? "ВКЛ" : "ВЫКЛ"}`,
+    toggleRemaining: (on: boolean) => `Режим процентов: ${on ? "Остаток (% свободно)" : "Расход (% потрачено)"}`,
     pickWindows: "Выбрать окна в панели…",
     thresholdItem: (v: number) => `Порог уведомлений: ${v > 0 ? `${v}% / 100%` : "только 100%"}`,
     checkUpdates: "Проверить обновления плагина…",
     upToDate: (v: string) => `opencode-limits-go v${v} — актуальная версия.`,
-    updateAvail: (v: string, pm: boolean) =>
-      pm ? `Доступна v${v} — выполните: opencode plugin update` : `Доступна v${v} — выполните /reload после обновления`,
+    updateManaged: (v: string) => `Доступна v${v} — выполните: opencode plugin update`,
+    updateInstallFailed: (err: string) => `Не удалось обновить: ${err}`,
     todayPrefix: "Сегодня",
+    tokUnit: "ток.",
+    modelsPrefix: "Модели",
     budgetPrefix: "Бюджет",
     fallbackHint: "Квота Go исчерпана — до сброса можно переключиться на OpenCode Zen или бесплатные модели.",
+    stalePrefix: "устарело",
     loading: "лимиты: …",
     noServer: "нет связи с сервером плагина",
     failed: "Не удалось получить лимиты",
@@ -85,14 +103,17 @@ export default Plugin.define({
     const copy = COPY[lang]
 
     const [tuiPrefs, setTuiPrefs] = ctx.storage.store<TuiPrefs>("opencode-limits-go.tui", {
-      initial: { rolling: true, weekly: true, monthly: true, showBars: false, warnThreshold: 80 },
+      initial: { rolling: true, weekly: true, monthly: true, showBars: false, showRemaining: false, warnThreshold: 80 },
     })
 
     const showBars = () => tuiPrefs.showBars === true
+    const showRemaining = () => tuiPrefs.showRemaining === true
     const warnAt = () => (typeof tuiPrefs.warnThreshold === "number" ? tuiPrefs.warnThreshold : 80)
 
     const [card, setCard] = createSignal<LimitCard | null>(null)
+    const [staleError, setStaleError] = createSignal("")
     const notified = new Map<string, number>()
+    const wasExhausted = new Set<string>()
     const stopCtrl = new AbortController()
     let notifiedVersion = ""
 
@@ -101,8 +122,9 @@ export default Plugin.define({
       try {
         const result = (await ctx.client.rpc(Limits).status({ force, lang }, { signal: stopCtrl.signal })) as LimitCard
         if (stopCtrl.signal.aborted) return null
-        setCard(result)
         if (result.ok) {
+          setCard(result)
+          setStaleError("")
           const now = Date.now()
           for (const row of newAlerts(result.rows, notified, warnAt())) {
             ctx.ui.toast.show({
@@ -110,12 +132,27 @@ export default Plugin.define({
               variant: row.used >= 100 ? "error" : "warning",
             })
           }
+          for (const row of recoveredAlerts(result.rows, wasExhausted)) {
+            ctx.ui.toast.show({
+              message: resetAlertMessage(row, lang),
+              variant: "info",
+            })
+          }
+        } else if (card()?.ok) {
+          setStaleError(result.error || copy.failed)
+        } else {
+          setCard(result)
+          setStaleError("")
         }
         return result
       } catch (error) {
         if (stopCtrl.signal.aborted) return null
         log("tui status failed", { error: errorText(error, "en") })
-        setCard(emptyCard(copy.noServer))
+        if (card()?.ok) {
+          setStaleError(copy.noServer)
+        } else {
+          setCard(emptyCard(copy.noServer))
+        }
         return null
       }
     }
@@ -150,11 +187,17 @@ export default Plugin.define({
         ])
         const today = summarizeStatsByProvider(statsRes?.models)
         const parts: string[] = []
-        if (today.goTokens > 0) parts.push(`Go ${formatTokensCompact(today.goTokens)} tok`)
+        if (today.goTokens > 0) parts.push(`Go ${formatTokensCompact(today.goTokens)} ${copy.tokUnit}`)
         if (today.zenCostUsd > 0 || today.zenTokens > 0) {
           parts.push(`Zen ${formatUsd(today.zenCostUsd)} (${formatTokensCompact(today.zenTokens)})`)
         }
         if (parts.length) lines.push(`${copy.todayPrefix}: ${parts.join(" · ")}`)
+        if (today.topModels.length) {
+          const modelsLine = today.topModels
+            .map((m) => `${m.modelID} (${formatTokensCompact(m.tokens)})`)
+            .join(" · ")
+          lines.push(`${copy.modelsPrefix}: ${modelsLine}`)
+        }
 
         const budgets = Array.isArray(limitsRes?.data?.budgets) ? limitsRes.data.budgets : []
         for (const b of budgets) {
@@ -172,6 +215,9 @@ export default Plugin.define({
         title: copy.windowsTitle,
         options: [
           { title: copy.allWindows, value: { rolling: true, weekly: true, monthly: true } },
+          { title: copy.win5h1w, value: { rolling: true, weekly: true, monthly: false } },
+          { title: copy.win5h1m, value: { rolling: true, weekly: false, monthly: true } },
+          { title: copy.win1w1m, value: { rolling: false, weekly: true, monthly: true } },
           { title: copy.only5h, value: { rolling: true, weekly: false, monthly: false } },
           { title: copy.only1w, value: { rolling: false, weekly: true, monthly: false } },
           { title: copy.only1m, value: { rolling: false, weekly: false, monthly: true } },
@@ -191,17 +237,21 @@ export default Plugin.define({
 
     const text = () => {
       const current = card()
-      return current ? formatTuiSidebar(current, tuiPrefs, showBars(), lang) : copy.loading
+      if (!current) return copy.loading
+      const base = formatTuiSidebar(current, tuiPrefs, showBars(), lang, Date.now(), showRemaining())
+      return current.ok && staleError() ? `${base} (${copy.stalePrefix})` : base
     }
 
     const fgColor = () => {
       const current = card()
       if (!current) return ctx.theme.text.muted
       if (!current.ok) return ctx.theme.text.feedback.error.base
-      const max = current.rows.reduce((acc, row) => Math.max(acc, row.used), 0)
+      const visibleRows = filterStripRows(current.rows, tuiPrefs)
+      const max = visibleRows.reduce((acc, row) => Math.max(acc, row.used), 0)
       if (max >= 100) return ctx.theme.text.feedback.error.base
       const w = warnAt()
       if (w > 0 && max >= w) return ctx.theme.text.feedback.warning.base
+      if (staleError()) return ctx.theme.text.muted
       return ctx.theme.text.base
     }
 
@@ -291,6 +341,7 @@ export default Plugin.define({
               title: copy.settingsTitle,
               options: [
                 { title: copy.toggleBars(!showBars()), value: "bars" },
+                { title: copy.toggleRemaining(!showRemaining()), value: "remaining" },
                 { title: copy.pickWindows, value: "windows" },
                 { title: copy.thresholdItem(warnAt()), value: "threshold" },
                 { title: copy.checkUpdates, value: "update" },
@@ -300,6 +351,10 @@ export default Plugin.define({
             if (action === "bars") {
               await setTuiPrefs((d) => {
                 d.showBars = !showBars()
+              })
+            } else if (action === "remaining") {
+              await setTuiPrefs((d) => {
+                d.showRemaining = !showRemaining()
               })
             } else if (action === "windows") {
               await pickWindows()
@@ -314,13 +369,33 @@ export default Plugin.define({
                   currentVersion: string
                   latestVersion: string
                   updateAvailable: boolean
+                  restartRequired?: boolean
                   managedByPackageManager?: boolean
                 }
+                if (stopCtrl.signal.aborted) return
+                if (res.restartRequired) {
+                  ctx.ui.toast.show({ message: copy.updated(res.latestVersion), variant: "info" })
+                  return
+                }
+                if (!res.updateAvailable) {
+                  ctx.ui.toast.show({ message: copy.upToDate(res.currentVersion), variant: "info" })
+                  return
+                }
+                if (res.managedByPackageManager) {
+                  ctx.ui.toast.show({ message: copy.updateManaged(res.latestVersion), variant: "info" })
+                  return
+                }
+                const installed = (await ctx.client.rpc(Limits).installUpdate({}, { signal: stopCtrl.signal })) as {
+                  ok: boolean
+                  version: string
+                  error: string
+                }
+                if (stopCtrl.signal.aborted) return
                 ctx.ui.toast.show({
-                  message: res.updateAvailable
-                    ? copy.updateAvail(res.latestVersion, !!res.managedByPackageManager)
-                    : copy.upToDate(res.currentVersion),
-                  variant: "info",
+                  message: installed.ok
+                    ? copy.updated(installed.version || res.latestVersion)
+                    : copy.updateInstallFailed(installed.error),
+                  variant: installed.ok ? "info" : "error",
                 })
               } catch {}
             }
