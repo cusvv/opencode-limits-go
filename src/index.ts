@@ -97,7 +97,8 @@ function sanitizeSnapshots(raw: unknown): UsageSnapshot[] {
   return raw.filter((item): item is UsageSnapshot => {
     if (!item || typeof item !== "object") return false
     const snap = item as Record<string, unknown>
-    return typeof snap.at === "number" && Number.isFinite(snap.at)
+    if (typeof snap.at !== "number" || !Number.isFinite(snap.at)) return false
+    return ["rolling", "weekly", "monthly"].every((key) => snap[key] === undefined || typeof snap[key] === "number")
   })
 }
 

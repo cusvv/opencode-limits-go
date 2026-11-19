@@ -137,7 +137,7 @@ export default Plugin.define({
       const notified = new Map<string, number>(changedAccount ? [] : Object.entries(alertState.notified))
       const wasExhausted = new Set<string>(changedAccount ? [] : alertState.exhausted)
       const risk = { ...(changedAccount ? {} : alertState.risk) }
-      let lastSpikeAlertAt = changedAccount ? 0 : alertState.spikeAt
+      let lastSpikeAlertAt = changedAccount || !Number.isFinite(alertState.spikeAt) ? 0 : alertState.spikeAt
 
       const triggered = newAlerts(result.rows, notified, warnAt())
       const recovered = recoveredAlerts(result.rows, wasExhausted)
