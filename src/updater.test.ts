@@ -164,3 +164,30 @@ test("isPackageManagerInstall skips GitHub file overwrite when inside OpenCode n
     await rm(tmp, { recursive: true, force: true })
   }
 })
+
+test("copyVerifiedPlugin recursively syncs src subdirectories and removes obsolete nested files/dirs", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "opencode-limits-go-nested-test-"))
+  try {
+    const srcRoot = path.join(tmp, "src-release")
+    await mkdir(path.join(srcRoot, "src", "gui"), { recursive: true })
+    await mkdir(path.join(srcRoot, "dist"), { recursive: true })
+    await writeFile(path.join(srcRoot, "package.json"), JSON.stringify({ name: "opencode-limits-go", version: "1.6.0" }))
+    await writeFile(path.join(srcRoot, "src", "index.ts"), "// index")
+    await writeFile(path.join(srcRoot, "src", "tui.tsx"), "// tui")
+    await writeFile(path.join(srcRoot, "src", "gui", "i18n.ts"), "// i18n")
+    await writeFile(path.join(srcRoot, "dist", "gui-experimental.cjs"), "// gui bundle")
+
+    const destRoot = path.join(tmp, "dest")
+    await mkdir(path.join(destRoot, "src", "gui"), { recursive: true })
+    await mkdir(path.join(destRoot, "src", "legacy"), { recursive: true })
+    await writeFile(path.join(destRoot, "src", "gui", "old.ts"), "// old")
+    await writeFile(path.join(destRoot, "src", "legacy", "dead.ts"), "// dead")
+
+    await copyVerifiedPlugin(srcRoot, destRoot)
+    assert.equal(await readFile(path.join(destRoot, "src", "gui", "i18n.ts"), "utf8"), "// i18n")
+    await assert.rejects(readFile(path.join(destRoot, "src", "gui", "old.ts"), "utf8"))
+    await assert.rejects(readFile(path.join(destRoot, "src", "legacy", "dead.ts"), "utf8"))
+  } finally {
+    await rm(tmp, { recursive: true, force: true })
+  }
+})

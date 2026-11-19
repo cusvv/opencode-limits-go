@@ -175,6 +175,33 @@ export async function findVerifiedPluginRoot(extractDir: string): Promise<string
   throw new Error("Downloaded archive does not contain a valid opencode-limits-go build")
 }
 
+async function syncSourceTree(srcDir: string, destDir: string): Promise<void> {
+  await mkdir(destDir, { recursive: true })
+  const nextEntries = new Set<string>()
+
+  for (const entry of await readdir(srcDir, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) continue
+    nextEntries.add(entry.name)
+    const srcPath = path.join(srcDir, entry.name)
+    const destPath = path.join(destDir, entry.name)
+    if (entry.isDirectory()) {
+      await syncSourceTree(srcPath, destPath)
+    } else if (entry.isFile()) {
+      await cp(srcPath, destPath, { force: true })
+    }
+  }
+
+  for (const entry of await readdir(destDir, { withFileTypes: true })) {
+    if (nextEntries.has(entry.name)) continue
+    const destPath = path.join(destDir, entry.name)
+    if (entry.isDirectory()) {
+      await rm(destPath, { recursive: true, force: true })
+    } else if (entry.isFile() && /\.(?:ts|tsx)$/.test(entry.name)) {
+      await rm(destPath, { force: true })
+    }
+  }
+}
+
 export async function copyVerifiedPlugin(srcRoot: string, destRoot: string): Promise<void> {
   for (const rel of TOP_LEVEL_FILES) {
     const src = path.join(srcRoot, rel)
@@ -189,22 +216,7 @@ export async function copyVerifiedPlugin(srcRoot: string, destRoot: string): Pro
     force: true,
   })
 
-  const srcDir = path.join(srcRoot, "src")
-  const destSrcDir = path.join(destRoot, "src")
-  await mkdir(destSrcDir, { recursive: true })
-
-  const nextFiles = new Set<string>()
-  for (const entry of await readdir(srcDir, { withFileTypes: true })) {
-    if (!entry.isFile()) continue
-    nextFiles.add(entry.name)
-    await cp(path.join(srcDir, entry.name), path.join(destSrcDir, entry.name), { force: true })
-  }
-
-  for (const entry of await readdir(destSrcDir, { withFileTypes: true })) {
-    if (entry.isFile() && /\.(?:ts|tsx)$/.test(entry.name) && !nextFiles.has(entry.name)) {
-      await rm(path.join(destSrcDir, entry.name), { force: true })
-    }
-  }
+  await syncSourceTree(path.join(srcRoot, "src"), path.join(destRoot, "src"))
 }
 
 export function createUpdater(deps: UpdaterDeps = {}) {
