@@ -1,16 +1,31 @@
 import { createEffect, createSignal, For, type JSX, on, onCleanup, Show } from "solid-js"
-import { Schema } from "effect"
 import { Command, Plugin, SettingsPage, Slot, Store, TitlebarItem } from "@opencode/plugin/gui"
 import { Limits } from "./rpc.ts"
+import { GUI_I18N } from "./gui/i18n.ts"
+import {
+  CONSOLE_URL,
+  type ConsoleBudget,
+  DisplayPrefs,
+  ExtrasPrefs,
+  type Placement,
+  Prefs,
+  type PresetKey,
+  SAMPLE_CARD,
+  StripPrefs,
+  type StripStyle,
+  type UpdateStatusInfo,
+  type ZenActivityInfo,
+} from "./gui/stores.ts"
+import { LimitsStrip, MiniBar, SectionDivider, amberText } from "./gui/components.tsx"
 import {
   type LimitCard,
   type LimitRow,
   type Locale,
-  type ProviderActivitySummary,
   type VisibleWindows,
   type WindowKey,
   alertMessage,
   cardText,
+  displayPercent,
   emptyCard,
   estimateWindowPace,
   filterStripRows,
@@ -19,197 +34,18 @@ import {
   newAlerts,
   normalizeLocale,
   paceSummary,
+  recoveredAlerts,
+  relativeAge,
+  resetAlertMessage,
   resetText,
   retry,
+  shortErrorLabel,
   sourceLabel,
   span,
   summarizeStatsByProvider,
-  tightLine,
   windowElapsedRatio,
   windowLabel,
 } from "./model.ts"
-
-const CONSOLE_URL = "https://opencode.ai/console"
-
-type UpdateStatusInfo = {
-  currentVersion: string
-  latestVersion: string
-  updateAvailable: boolean
-  autoUpdated: boolean
-  restartRequired: boolean
-  managedByPackageManager?: boolean
-  releaseUrl: string
-  checkedAtMs: number
-  error: string
-}
-
-type ConsoleBudget = {
-  id: string
-  limit: number
-  spent: number
-  resetsAt: number
-}
-
-type ZenActivityInfo = {
-  usageUrl?: string
-  budgets: ConsoleBudget[]
-  today: ProviderActivitySummary
-}
-
-const PLACEMENTS = ["bottom", "top", "both", "titlebar", "hidden"] as const
-type Placement = (typeof PLACEMENTS)[number]
-type StripStyle = "bars_pct" | "text" | "bars"
-
-const SAMPLE_CARD: LimitCard = {
-  ok: true,
-  org: "OpenCode",
-  email: "",
-  checkedAt: "",
-  source: "",
-  tight: "",
-  error: "",
-  rows: [
-    { key: "rolling", label: "5h", used: 18, status: "ok", resetsAt: "", resetsIn: "" },
-    { key: "weekly", label: "1w", used: 42, status: "ok", resetsAt: "", resetsIn: "" },
-    { key: "monthly", label: "1m", used: 68, status: "ok", resetsAt: "", resetsIn: "" },
-  ],
-}
-
-const Prefs = Schema.Struct({
-  placement: Schema.Literals(PLACEMENTS),
-  showBars: Schema.Boolean,
-  alerts: Schema.Boolean,
-  autoUpdate: Schema.Boolean,
-})
-
-const StripPrefs = Schema.Struct({
-  show5h: Schema.Boolean,
-  show1w: Schema.Boolean,
-  show1m: Schema.Boolean,
-  showPercent: Schema.Boolean,
-  showLabels: Schema.Boolean,
-})
-
-const ExtrasPrefs = Schema.Struct({
-  monoBars: Schema.Boolean,
-  showZenStats: Schema.Boolean,
-  warnThreshold: Schema.Number,
-  pollSeconds: Schema.Number,
-})
-
-function tone(used: number, opts?: { mono?: boolean; light?: boolean; warnAt?: number }): string {
-  if (used >= 100) return "#ef4444"
-  const warn = opts?.warnAt ?? 80
-  if (warn > 0 && used >= warn) return "#f59e0b"
-  if (opts?.mono) return opts.light ? "rgba(0,0,0,.45)" : "rgba(255,255,255,.58)"
-  return "#22c55e"
-}
-
-function MiniBar(props: {
-  used: number
-  width?: number
-  light: boolean
-  mono?: boolean
-  warnAt?: number
-  elapsedRatio?: number | null
-}) {
-  const track = () => (props.light ? "rgba(0,0,0,.14)" : "rgba(255,255,255,.16)")
-  const widthPct = () => Math.min(Math.max(props.used, 0), 100)
-  const tickColor = () => (props.light ? "rgba(0,0,0,.55)" : "rgba(255,255,255,.75)")
-  const tickPct = () => {
-    if (typeof props.elapsedRatio !== "number") return null
-    return Math.min(98, Math.max(2, Math.round(props.elapsedRatio * 100)))
-  }
-  return (
-    <span
-      style={`position:relative;display:inline-block;width:${props.width ?? 32}px;height:5px;background:${track()};border-radius:999px;overflow:hidden;vertical-align:middle;`}
-    >
-      <span
-        style={`display:block;height:100%;width:${widthPct()}%;background:${tone(props.used, { mono: props.mono, light: props.light, warnAt: props.warnAt })};`}
-      />
-      <Show when={tickPct() !== null}>
-        <span
-          style={`position:absolute;top:0;bottom:0;left:${tickPct()}%;width:1.5px;background:${tickColor()};`}
-        />
-      </Show>
-    </span>
-  )
-}
-
-function LimitsStrip(props: {
-  card: LimitCard | null
-  ready: boolean
-  lang: Locale
-  light: boolean
-  showBars: boolean
-  showPercent: boolean
-  showLabels: boolean
-  monoBars?: boolean
-  warnAt?: number
-  visible: VisibleWindows
-  variant: "bottom" | "top"
-  preview?: boolean
-  onOpen: () => void
-}) {
-  const rows = () => filterStripRows(props.card?.rows ?? [], props.visible)
-  const effBars = () => props.showBars
-  const effPercent = () => props.showPercent || !effBars()
-  const errorColor = () => (props.light ? "#b45309" : "#f59e0b")
-  const prefix = () => (props.lang === "ru" ? "лимиты" : "limits")
-  const noData = () => (props.lang === "ru" ? "нет данных" : "no data")
-
-  const buttonStyle = () => {
-    const cursor = props.preview ? "default" : "pointer"
-    if (props.variant === "top") {
-      const border = props.light ? "rgba(0,0,0,.12)" : "rgba(255,255,255,.12)"
-      const bg = props.light ? "rgba(0,0,0,.04)" : "rgba(255,255,255,.05)"
-      return `background:${bg};border:1px solid ${border};border-radius:6px;margin:0;color:inherit;font:inherit;cursor:${cursor};display:inline-flex;align-items:center;gap:8px;padding:4px 8px;font-size:11px;line-height:1.2;white-space:nowrap;`
-    }
-    return `background:transparent;border:0;margin:0;color:inherit;font:inherit;cursor:${cursor};display:inline-flex;align-items:center;gap:12px;padding:3px 10px;font-size:11px;white-space:nowrap;`
-  }
-
-  return (
-    <button type="button" onClick={props.onOpen} style={buttonStyle()}>
-      <Show
-        when={props.card?.ok}
-        fallback={
-          <span style={`color:${errorColor()};`}>
-            {prefix()}: {props.ready ? props.card?.error || noData() : "…"}
-          </span>
-        }
-      >
-        <For each={rows()}>
-          {(row: LimitRow) => {
-            const hot = () =>
-              estimateWindowPace(row, props.card?.checkedAtMs || Date.now(), props.lang, props.card?.snapshots)?.kind === "hot"
-            return (
-              <span style="display:inline-flex;align-items:center;gap:5px;">
-                <Show when={props.showLabels}>
-                  <span style="opacity:.6;">{windowLabel(row, props.lang)}</span>
-                </Show>
-                <Show when={effBars()}>
-                  <MiniBar
-                    used={row.used}
-                    width={props.variant === "top" ? 24 : 32}
-                    light={props.light}
-                    mono={props.monoBars}
-                    warnAt={props.warnAt}
-                  />
-                </Show>
-                <Show when={effPercent()}>
-                  <span style="font-variant-numeric:tabular-nums;">{row.used}%</span>
-                </Show>
-                <Show when={hot()}>
-                  <span style="color:#f59e0b;font-size:10px;line-height:1;">⚡</span>
-                </Show>
-              </span>
-            )
-          }}
-        </For>
-      </Show>
-    </button>
-  )
-}
 
 export default Plugin.define({
   stores: {
@@ -232,185 +68,26 @@ export default Plugin.define({
       warnThreshold: 80,
       pollSeconds: 90,
     }),
+    display: Store.global(DisplayPrefs, {
+      showRemaining: false,
+    }),
   },
-  i18n: {
-    en: {
-      "command.limits": "OpenCode Go limits",
-      "command.settings": "OpenCode Go limits: settings",
-      "limits.ok": "OK",
-      "limits.refresh": "Refresh",
-      "limits.settings": "Settings",
-      "limits.console": "Console",
-      "limits.consoleHint": "Open OpenCode Console in browser",
-      "limits.paceHint": "Estimated time left at current pace",
-      "limits.elapsedLegend": "| marker = elapsed window time",
-      "limits.deltaHint": "Change over ~1h",
-      "limits.zenTitle": "OpenCode Zen & today",
-      "limits.todayGo": "Go today",
-      "limits.todayZen": "Zen today",
-      "limits.budget": "Budget",
-      "limits.fallbackHint": "Go quota reached — switch to OpenCode Zen or a free model until reset",
-      "limits.reset": "reset",
-      "limits.in": "in",
-      "limits.noServer": "cannot reach plugin server",
-      "limits.failed": "Failed to load limits",
-      "settings.title": "OpenCode Go limits",
-      "settings.description": "Configure where limits are shown, alerts, and GitHub auto-updates",
-      "settings.section.display": "Display",
-      "settings.section.notifications": "Notifications",
-      "settings.section.updates": "Updates",
-      "settings.placement.title": "Widget position",
-      "settings.placement.description": "Where to show the usage indicator in OpenCode",
-      "settings.placement.bottom": "Bottom bar (default)",
-      "settings.placement.top": "Top bar (session header)",
-      "settings.placement.both": "Bottom + top bar",
-      "settings.placement.titlebar": "Titlebar / sidebar button",
-      "settings.placement.hidden": "Hidden (command only)",
-      "settings.preview.label": "Preview",
-      "settings.presets.title": "Quick presets",
-      "settings.presets.standard": "Standard",
-      "settings.presets.only5h": "Only 5h",
-      "settings.presets.text": "Text",
-      "settings.presets.minimal": "Minimal",
-      "settings.windows.title": "Windows in strip",
-      "settings.windows.description": "Choose which windows appear on the bar",
-      "settings.windows.all": "All",
-      "settings.style.title": "Indicator style",
-      "settings.style.description": "Bars with %, text only, or bars only",
-      "settings.style.bars_pct": "Bar + %",
-      "settings.style.text": "Text only",
-      "settings.style.bars": "Bars only",
-      "settings.labels.title": "Show window labels",
-      "settings.labels.description": "Show 5h, 1w, 1m prefixes",
-      "settings.mono.title": "Monochrome bars",
-      "settings.mono.description": "Keep bars neutral below alert threshold",
-      "settings.zenStats.title": "Show Zen & today's spend",
-      "settings.zenStats.description": "Show OpenCode Zen cost, budgets, and today's tokens in dialog",
-      "settings.alerts.title": "Threshold alerts",
-      "settings.alerts.description": "Toast when a window reaches threshold",
-      "settings.threshold.title": "Warning threshold",
-      "settings.threshold.description": "First alert before 100% limit",
-      "settings.threshold.70": "70% and 100%",
-      "settings.threshold.80": "80% and 100%",
-      "settings.threshold.90": "90% and 100%",
-      "settings.threshold.0": "100% only",
-      "settings.poll.title": "Refresh interval",
-      "settings.poll.description": "How often to poll quota usage",
-      "settings.poll.30": "Every 30s",
-      "settings.poll.90": "Every 90s",
-      "settings.poll.300": "Every 5m",
-      "settings.autoUpdate.title": "Auto-update from GitHub",
-      "settings.autoUpdate.description": "Automatically download and install new releases from GitHub",
-      "settings.version.title": "Plugin version",
-      "settings.version.checking": "Checking for updates…",
-      "settings.version.upToDate": "v{{version}} · Up to date",
-      "settings.version.available": "v{{current}} → v{{latest}} available",
-      "settings.version.managed": "v{{current}} → v{{latest}} · Run: opencode plugin update",
-      "settings.version.restart": "Updated to v{{version}} · Restart OpenCode Desktop to apply",
-      "settings.version.error": "v{{version}} · Check failed: {{error}}",
-      "settings.update.check": "Check now",
-      "settings.update.install": "Update now",
-      "settings.update.installedToast": "opencode-limits-go updated to v{{version}}. Restart OpenCode Desktop to apply.",
-      "settings.update.failedToast": "Update failed: {{error}}",
-      "settings.reset": "Reset",
-      "settings.done": "Done",
-      "settings.openAll": "Open in Settings",
-    },
-    ru: {
-      "command.limits": "Лимиты OpenCode Go",
-      "command.settings": "Лимиты OpenCode Go: настройки",
-      "limits.ok": "ОК",
-      "limits.refresh": "Обновить",
-      "limits.settings": "Настройки",
-      "limits.console": "Консоль",
-      "limits.consoleHint": "Открыть OpenCode Console в браузере",
-      "limits.paceHint": "Оценка запаса по текущему темпу",
-      "limits.elapsedLegend": "риска | = прошло времени окна",
-      "limits.deltaHint": "Изменение примерно за 1 час",
-      "limits.zenTitle": "OpenCode Zen и статистика за сегодня",
-      "limits.todayGo": "Go сегодня",
-      "limits.todayZen": "Zen сегодня",
-      "limits.budget": "Бюджет",
-      "limits.fallbackHint": "Квота Go исчерпана — до сброса можно переключиться на OpenCode Zen или бесплатные модели",
-      "limits.reset": "сброс",
-      "limits.in": "через",
-      "limits.noServer": "нет связи с сервером плагина",
-      "limits.failed": "Не удалось получить лимиты",
-      "settings.title": "Лимиты OpenCode Go",
-      "settings.description": "Настройка расположения, уведомлений и автообновлений с GitHub",
-      "settings.section.display": "Отображение",
-      "settings.section.notifications": "Уведомления",
-      "settings.section.updates": "Обновления",
-      "settings.placement.title": "Расположение виджета",
-      "settings.placement.description": "Где показывать индикатор лимитов в окне OpenCode",
-      "settings.placement.bottom": "Снизу (строка состояния)",
-      "settings.placement.top": "Сверху (в топбаре сессии)",
-      "settings.placement.both": "Снизу и сверху",
-      "settings.placement.titlebar": "Кнопка в заголовке / сайдбаре",
-      "settings.placement.hidden": "Скрыто (только /limits)",
-      "settings.preview.label": "Предпросмотр",
-      "settings.presets.title": "Быстрые пресеты",
-      "settings.presets.standard": "Стандарт",
-      "settings.presets.only5h": "Только 5ч",
-      "settings.presets.text": "Без баров",
-      "settings.presets.minimal": "Минимум",
-      "settings.windows.title": "Окна в мини-барах",
-      "settings.windows.description": "Какие лимиты показывать на панели",
-      "settings.windows.all": "Все",
-      "settings.style.title": "Вид индикатора",
-      "settings.style.description": "Бары с %, только текст или только бары",
-      "settings.style.bars_pct": "Бар + %",
-      "settings.style.text": "Без баров",
-      "settings.style.bars": "Только бары",
-      "settings.labels.title": "Подписи окон",
-      "settings.labels.description": "Показывать префиксы 5ч, 1н, 1м",
-      "settings.mono.title": "Монохромные бары",
-      "settings.mono.description": "Нейтральный цвет до достижения порога",
-      "settings.zenStats.title": "Статистика Zen и за сегодня",
-      "settings.zenStats.description": "Показывать траты Zen, бюджеты и токены за сегодня в окне",
-      "settings.alerts.title": "Уведомления о порогах",
-      "settings.alerts.description": "Показывать тост при достижении порога",
-      "settings.threshold.title": "Порог предупреждения",
-      "settings.threshold.description": "Первое уведомление до 100%",
-      "settings.threshold.70": "70% и 100%",
-      "settings.threshold.80": "80% и 100%",
-      "settings.threshold.90": "90% и 100%",
-      "settings.threshold.0": "Только 100%",
-      "settings.poll.title": "Частота обновления",
-      "settings.poll.description": "Как часто запрашивать лимиты",
-      "settings.poll.30": "Каждые 30с",
-      "settings.poll.90": "Каждые 90с",
-      "settings.poll.300": "Раз в 5м",
-      "settings.autoUpdate.title": "Автообновление с GitHub",
-      "settings.autoUpdate.description": "Автоматически скачивать и устанавливать новые релизы с GitHub",
-      "settings.version.title": "Версия плагина",
-      "settings.version.checking": "Проверка обновлений…",
-      "settings.version.upToDate": "v{{version}} · Актуальная версия",
-      "settings.version.available": "Доступна v{{latest}} (текущая v{{current}})",
-      "settings.version.managed": "v{{current}} → v{{latest}} · Выполните: opencode plugin update",
-      "settings.version.restart": "Обновлено до v{{version}} · Перезапустите OpenCode Desktop",
-      "settings.version.error": "v{{version}} · Ошибка проверки: {{error}}",
-      "settings.update.check": "Проверить",
-      "settings.update.install": "Обновить",
-      "settings.update.installedToast": "opencode-limits-go обновлён до v{{version}}. Перезапустите OpenCode Desktop.",
-      "settings.update.failedToast": "Не удалось обновить: {{error}}",
-      "settings.reset": "Сбросить",
-      "settings.done": "Готово",
-      "settings.openAll": "В общих настройках",
-    },
-  },
+  i18n: GUI_I18N,
   setup(ctx) {
     const ui = ctx.ui
     const prefs = ctx.stores.prefs
     const strip = ctx.stores.strip
     const extras = ctx.stores.extras
+    const display = ctx.stores.display
     const [card, setCard] = createSignal<LimitCard | null>(null)
+    const [staleError, setStaleError] = createSignal("")
     const [zenActivity, setZenActivity] = createSignal<ZenActivityInfo | null>(null)
     const [ready, setReady] = createSignal(false)
     const [refreshing, setRefreshing] = createSignal(false)
     const [updateInfo, setUpdateInfo] = createSignal<UpdateStatusInfo | null>(null)
     const [updateBusy, setUpdateBusy] = createSignal(false)
     const notified = new Map<string, number>()
+    const wasExhausted = new Set<string>()
     let notifiedUpdateVersion = ""
     let lastFocusRefreshAt = 0
 
@@ -458,21 +135,37 @@ export default Plugin.define({
       })
     }
 
-    type PresetKey = "standard" | "only5h" | "text" | "minimal"
+    const activePreset = (): PresetKey | null => {
+      const s = strip.value
+      const bars = prefs.value.showBars
+      if (bars && s.show5h && s.show1w && s.show1m && s.showPercent && s.showLabels) return "standard"
+      if (bars && s.show5h && !s.show1w && !s.show1m && s.showPercent && s.showLabels) return "only5h"
+      if (!bars && s.show5h && s.show1w && s.show1m && s.showPercent && s.showLabels) return "text"
+      if (!bars && s.show5h && !s.show1w && !s.show1m && s.showPercent && !s.showLabels) return "minimal"
+      return null
+    }
 
     function applyPreset(preset: PresetKey) {
       if (preset === "standard") {
         strip.set({ show5h: true, show1w: true, show1m: true, showPercent: true, showLabels: true })
-        prefs.update((d) => { d.showBars = true })
+        prefs.update((d) => {
+          d.showBars = true
+        })
       } else if (preset === "only5h") {
         strip.set({ show5h: true, show1w: false, show1m: false, showPercent: true, showLabels: true })
-        prefs.update((d) => { d.showBars = true })
+        prefs.update((d) => {
+          d.showBars = true
+        })
       } else if (preset === "text") {
         strip.set({ show5h: true, show1w: true, show1m: true, showPercent: true, showLabels: true })
-        prefs.update((d) => { d.showBars = false })
+        prefs.update((d) => {
+          d.showBars = false
+        })
       } else {
         strip.set({ show5h: true, show1w: false, show1m: false, showPercent: true, showLabels: false })
-        prefs.update((d) => { d.showBars = false })
+        prefs.update((d) => {
+          d.showBars = false
+        })
       }
     }
 
@@ -480,6 +173,7 @@ export default Plugin.define({
       prefs.set({ placement: "bottom", showBars: true, alerts: true, autoUpdate: true })
       strip.set({ show5h: true, show1w: true, show1m: true, showPercent: true, showLabels: true })
       extras.set({ monoBars: false, showZenStats: true, warnThreshold: 80, pollSeconds: 90 })
+      display.set({ showRemaining: false })
       void syncAutoUpdate(true)
     }
 
@@ -489,12 +183,16 @@ export default Plugin.define({
       const c = card()
       const l = lang()
       const base = ctx.t("command.limits")
-      if (!c?.ok) return base
+      if (!c?.ok) {
+        return c?.error ? `${base}\n${c.error}` : base
+      }
       const now = Date.now()
+      const rem = display.value.showRemaining
       const rowsText = c.rows
         .map((r) => {
           const rs = resetText(r.resetsAtMs, r.resetsIn, now, l)
-          return `${windowLabel(r, l)} ${r.used}% (${rs.text})`
+          const pct = displayPercent(r.used, rem)
+          return `${windowLabel(r, l)} ${pct}%${rem ? ` ${ctx.t("limits.left")}` : ""} (${rs.text})`
         })
         .join(" · ")
       const pace = paceSummary(c.rows, now, l, c.snapshots)
@@ -505,7 +203,8 @@ export default Plugin.define({
           : z && z.today.goTokens > 0
             ? `${ctx.t("limits.todayGo")}: ${formatTokensCompact(z.today.goTokens)}`
             : ""
-      return [base, rowsText, pace?.text, zenLine].filter(Boolean).join("\n")
+      const stale = staleError() ? ctx.t("limits.stale", { error: staleError() }) : ""
+      return [base, rowsText, pace?.text, zenLine, stale].filter(Boolean).join("\n")
     }
 
     const placementOptions = () => [
@@ -541,7 +240,7 @@ export default Plugin.define({
             session?: {
               stats?: (input?: { from?: number }, opts?: { signal?: AbortSignal }) => Promise<{
                 models?: Array<{
-                  model?: { providerID?: string }
+                  model?: { providerID?: string; modelID?: string }
                   steps?: number
                   cost?: number
                   tokens?: { input?: number; output?: number; reasoning?: number }
@@ -560,8 +259,9 @@ export default Plugin.define({
         if (ctx.signal.aborted) return
         const budgets: ConsoleBudget[] = Array.isArray(limitsRes?.data?.budgets)
           ? limitsRes.data.budgets
-              .filter((b): b is { id: string; limit: number; spent: number; resetsAt: number } =>
-                typeof b?.limit === "number" && b.limit > 0 && typeof b?.spent === "number",
+              .filter(
+                (b): b is { id: string; limit: number; spent: number; resetsAt: number } =>
+                  typeof b?.limit === "number" && b.limit > 0 && typeof b?.spent === "number",
               )
               .map((b) => ({
                 id: typeof b.id === "string" ? b.id : "budget",
@@ -572,7 +272,8 @@ export default Plugin.define({
           : []
         const today = summarizeStatsByProvider(statsRes?.models)
         const usageUrl =
-          typeof limitsRes?.data?.workspace?.usageURL === "string" && limitsRes.data.workspace.usageURL.startsWith("https://")
+          typeof limitsRes?.data?.workspace?.usageURL === "string" &&
+          limitsRes.data.workspace.usageURL.startsWith("https://")
             ? limitsRes.data.workspace.usageURL
             : undefined
         setZenActivity({ usageUrl, budgets, today })
@@ -589,12 +290,14 @@ export default Plugin.define({
           .rpc(Limits)
           .status({ force, lang: currentLang, maxAgeMs }, { signal: ctx.signal })) as LimitCard
         if (ctx.signal.aborted) return null
-        setCard(result)
         setReady(true)
-        void loadZenActivity()
         if (result.ok) {
+          setCard(result)
+          setStaleError("")
+          void loadZenActivity()
           const now = Date.now()
           const triggered = newAlerts(result.rows, notified, extras.value.warnThreshold)
+          const recovered = recoveredAlerts(result.rows, wasExhausted)
           if (prefs.value.alerts) {
             for (const row of triggered) {
               ctx.toast.show({
@@ -602,13 +305,28 @@ export default Plugin.define({
                 title: alertMessage(row, now, currentLang),
               })
             }
+            for (const row of recovered) {
+              ctx.toast.show({
+                variant: "success",
+                title: resetAlertMessage(row, currentLang),
+              })
+            }
           }
+        } else if (card()?.ok) {
+          setStaleError(result.error || ctx.t("limits.failed"))
+        } else {
+          setCard(result)
+          setStaleError("")
         }
         return result
       } catch {
         if (ctx.signal.aborted) return null
-        setCard(emptyCard(ctx.t("limits.noServer")))
         setReady(true)
+        if (card()?.ok) {
+          setStaleError(ctx.t("limits.noServer"))
+        } else {
+          setCard(emptyCard(ctx.t("limits.noServer")))
+        }
         return null
       } finally {
         if (force && !ctx.signal.aborted) setRefreshing(false)
@@ -627,13 +345,17 @@ export default Plugin.define({
       try {
         const res = (await ctx.client
           .rpc(Limits)
-          .updateStatus({ check: checkNow, autoInstall: prefs.value.autoUpdate }, { signal: ctx.signal })) as UpdateStatusInfo
+          .updateStatus(
+            { check: checkNow, autoInstall: prefs.value.autoUpdate },
+            { signal: ctx.signal },
+          )) as UpdateStatusInfo
         if (ctx.signal.aborted) return
         setUpdateInfo(res)
         if (res.autoUpdated || res.restartRequired) {
           notifyUpdated(res.latestVersion)
         }
-      } catch {} finally {
+      } catch {
+      } finally {
         if (checkNow && !ctx.signal.aborted) setUpdateBusy(false)
       }
     }
@@ -657,7 +379,10 @@ export default Plugin.define({
         await checkUpdates(false)
       } catch (error) {
         if (!ctx.signal.aborted) {
-          ctx.toast.show({ variant: "error", title: ctx.t("settings.update.failedToast", { error: String(error) }) })
+          ctx.toast.show({
+            variant: "error",
+            title: ctx.t("settings.update.failedToast", { error: String(error) }),
+          })
         }
       } finally {
         if (!ctx.signal.aborted) setUpdateBusy(false)
@@ -751,7 +476,7 @@ export default Plugin.define({
       )
     }
 
-    function DisplayFields(props: { page?: boolean }) {
+    function DisplayFields(props: { page?: boolean; compact?: boolean }) {
       const previewCard = () => (card()?.ok ? card()! : SAMPLE_CARD)
       const previewBannerStyle = () => {
         const border = light() ? "rgba(0,0,0,.1)" : "rgba(255,255,255,.1)"
@@ -784,6 +509,7 @@ export default Plugin.define({
           showBars={prefs.value.showBars}
           showPercent={strip.value.showPercent}
           showLabels={strip.value.showLabels}
+          showRemaining={display.value.showRemaining}
           monoBars={extras.value.monoBars}
           warnAt={extras.value.warnThreshold}
           visible={visibleWindows()}
@@ -797,7 +523,11 @@ export default Plugin.define({
         <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;justify-content:flex-end;">
           <For each={presetItems}>
             {(item) => (
-              <ui.Button size="small" variant="neutral" onClick={() => applyPreset(item.key)}>
+              <ui.Button
+                size="small"
+                variant={activePreset() === item.key ? "contrast" : "neutral"}
+                onClick={() => applyPreset(item.key)}
+              >
                 {item.label()}
               </ui.Button>
             )}
@@ -849,7 +579,11 @@ export default Plugin.define({
               label={ctx.t("settings.placement.title")}
               options={placementOptions()}
               value={prefs.value.placement}
-              onChange={(value) => prefs.update((draft) => { draft.placement = value })}
+              onChange={(value) =>
+                prefs.update((draft) => {
+                  draft.placement = value
+                })
+              }
             />
           </SettingField>
           <SettingField
@@ -892,46 +626,75 @@ export default Plugin.define({
           </SettingField>
           <SettingField
             page={props.page}
-            id="opencode-limits-go-labels"
-            title={ctx.t("settings.labels.title")}
-            description={ctx.t("settings.labels.description")}
+            id="opencode-limits-go-remaining"
+            title={ctx.t("settings.remaining.title")}
+            description={ctx.t("settings.remaining.description")}
           >
             <ui.Switch
-              label={ctx.t("settings.labels.title")}
+              label={ctx.t("settings.remaining.title")}
               hideLabel
-              checked={strip.value.showLabels}
-              onChange={(checked) => strip.update((draft) => { draft.showLabels = checked })}
+              checked={display.value.showRemaining}
+              onChange={(checked) =>
+                display.update((draft) => {
+                  draft.showRemaining = checked
+                })
+              }
             />
           </SettingField>
-          <SettingField
-            page={props.page}
-            id="opencode-limits-go-mono"
-            title={ctx.t("settings.mono.title")}
-            description={ctx.t("settings.mono.description")}
-          >
-            <ui.Switch
-              label={ctx.t("settings.mono.title")}
-              hideLabel
-              checked={extras.value.monoBars}
-              onChange={(checked) => extras.update((draft) => { draft.monoBars = checked })}
-            />
-          </SettingField>
-          <SettingField
-            page={props.page}
-            id="opencode-limits-go-zenstats"
-            title={ctx.t("settings.zenStats.title")}
-            description={ctx.t("settings.zenStats.description")}
-          >
-            <ui.Switch
-              label={ctx.t("settings.zenStats.title")}
-              hideLabel
-              checked={extras.value.showZenStats}
-              onChange={(checked) => {
-                extras.update((draft) => { draft.showZenStats = checked })
-                if (checked) void loadZenActivity()
-              }}
-            />
-          </SettingField>
+          <Show when={!props.compact}>
+            <SettingField
+              page={props.page}
+              id="opencode-limits-go-labels"
+              title={ctx.t("settings.labels.title")}
+              description={ctx.t("settings.labels.description")}
+            >
+              <ui.Switch
+                label={ctx.t("settings.labels.title")}
+                hideLabel
+                checked={strip.value.showLabels}
+                onChange={(checked) =>
+                  strip.update((draft) => {
+                    draft.showLabels = checked
+                  })
+                }
+              />
+            </SettingField>
+            <SettingField
+              page={props.page}
+              id="opencode-limits-go-mono"
+              title={ctx.t("settings.mono.title")}
+              description={ctx.t("settings.mono.description")}
+            >
+              <ui.Switch
+                label={ctx.t("settings.mono.title")}
+                hideLabel
+                checked={extras.value.monoBars}
+                onChange={(checked) =>
+                  extras.update((draft) => {
+                    draft.monoBars = checked
+                  })
+                }
+              />
+            </SettingField>
+            <SettingField
+              page={props.page}
+              id="opencode-limits-go-zenstats"
+              title={ctx.t("settings.zenStats.title")}
+              description={ctx.t("settings.zenStats.description")}
+            >
+              <ui.Switch
+                label={ctx.t("settings.zenStats.title")}
+                hideLabel
+                checked={extras.value.showZenStats}
+                onChange={(checked) => {
+                  extras.update((draft) => {
+                    draft.showZenStats = checked
+                  })
+                  if (checked) void loadZenActivity()
+                }}
+              />
+            </SettingField>
+          </Show>
         </>
       )
     }
@@ -955,7 +718,11 @@ export default Plugin.define({
               label={ctx.t("settings.alerts.title")}
               hideLabel
               checked={prefs.value.alerts}
-              onChange={(checked) => prefs.update((draft) => { draft.alerts = checked })}
+              onChange={(checked) =>
+                prefs.update((draft) => {
+                  draft.alerts = checked
+                })
+              }
             />
           </SettingField>
           <SettingField
@@ -968,7 +735,11 @@ export default Plugin.define({
               label={ctx.t("settings.threshold.title")}
               options={thresholdOptions()}
               value={String(extras.value.warnThreshold)}
-              onChange={(value) => extras.update((draft) => { draft.warnThreshold = Number(value) })}
+              onChange={(value) =>
+                extras.update((draft) => {
+                  draft.warnThreshold = Number(value)
+                })
+              }
             />
           </SettingField>
         </>
@@ -990,8 +761,9 @@ export default Plugin.define({
     }
 
     function UpdateFields(props: { page?: boolean }) {
+      const isManaged = () => !!updateInfo()?.managedByPackageManager
       const canInstall = () =>
-        !!updateInfo()?.updateAvailable && !updateInfo()?.restartRequired && !updateInfo()?.managedByPackageManager
+        !!updateInfo()?.updateAvailable && !updateInfo()?.restartRequired && !isManaged()
       const pollOptions = () => [
         { value: "30" as const, label: ctx.t("settings.poll.30") },
         { value: "90" as const, label: ctx.t("settings.poll.90") },
@@ -1009,25 +781,45 @@ export default Plugin.define({
               label={ctx.t("settings.poll.title")}
               options={pollOptions()}
               value={String(extras.value.pollSeconds)}
-              onChange={(value) => extras.update((draft) => { draft.pollSeconds = Number(value) })}
+              onChange={(value) =>
+                extras.update((draft) => {
+                  draft.pollSeconds = Number(value)
+                })
+              }
             />
           </SettingField>
-          <SettingField
-            page={props.page}
-            id="opencode-limits-go-autoupdate"
-            title={ctx.t("settings.autoUpdate.title")}
-            description={ctx.t("settings.autoUpdate.description")}
+          <Show
+            when={!isManaged()}
+            fallback={
+              <SettingField
+                page={props.page}
+                id="opencode-limits-go-autoupdate"
+                title={ctx.t("settings.autoUpdate.title")}
+                description={ctx.t("settings.autoUpdate.managed")}
+              >
+                <span style="font-size:11px;opacity:.55;">CLI</span>
+              </SettingField>
+            }
           >
-            <ui.Switch
-              label={ctx.t("settings.autoUpdate.title")}
-              hideLabel
-              checked={prefs.value.autoUpdate}
-              onChange={(checked) => {
-                prefs.update((draft) => { draft.autoUpdate = checked })
-                void syncAutoUpdate(checked)
-              }}
-            />
-          </SettingField>
+            <SettingField
+              page={props.page}
+              id="opencode-limits-go-autoupdate"
+              title={ctx.t("settings.autoUpdate.title")}
+              description={ctx.t("settings.autoUpdate.description")}
+            >
+              <ui.Switch
+                label={ctx.t("settings.autoUpdate.title")}
+                hideLabel
+                checked={prefs.value.autoUpdate}
+                onChange={(checked) => {
+                  prefs.update((draft) => {
+                    draft.autoUpdate = checked
+                  })
+                  void syncAutoUpdate(checked)
+                }}
+              />
+            </SettingField>
+          </Show>
           <SettingField
             page={props.page}
             id="opencode-limits-go-version"
@@ -1094,12 +886,74 @@ export default Plugin.define({
           }
         >
           <div style="display:flex;flex-direction:column;gap:10px;width:100%;box-sizing:border-box;">
-            <DisplayFields />
+            <DisplayFields compact />
+            <SectionDivider label={ctx.t("settings.section.notifications")} light={light()} />
             <NotificationFields />
-            <UpdateFields />
           </div>
         </ui.Dialog>
       ))
+    }
+
+    function openErrorDialog(errorMsg: string) {
+      ctx.dialogs.open((dialog) => {
+        const [err, setErr] = createSignal(errorMsg)
+        const handleRetry = async () => {
+          const next = await refresh(true)
+          if (ctx.signal.aborted) return
+          if (next?.ok) {
+            dialog.close()
+            openCard(next)
+          } else {
+            setErr(next?.error || ctx.t("limits.failed"))
+          }
+        }
+        return (
+          <ui.Dialog
+            title={ctx.t("limits.errorTitle")}
+            size="fit"
+            footer={
+              <div style="display:flex;align-items:center;justify-content:space-between;width:100%;gap:8px;">
+                <div style="display:flex;align-items:center;gap:6px;">
+                  <ui.Tooltip value={ctx.t("limits.settings")}>
+                    <ui.IconButton
+                      icon="settings-gear"
+                      label={ctx.t("limits.settings")}
+                      variant="neutral"
+                      onClick={() => {
+                        dialog.close()
+                        openSettingsDialog()
+                      }}
+                    />
+                  </ui.Tooltip>
+                  <ui.Button
+                    variant="neutral"
+                    size="small"
+                    icon="square-arrow-top-right"
+                    onClick={() => ctx.system.openExternal(consoleUrl())}
+                  >
+                    {ctx.t("limits.console")}
+                  </ui.Button>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <ui.Button variant="contrast" icon="refresh" busy={refreshing()} onClick={() => void handleRetry()}>
+                    {ctx.t("limits.retry")}
+                  </ui.Button>
+                  <ui.Button variant="neutral" onClick={dialog.close}>
+                    {ctx.t("limits.close")}
+                  </ui.Button>
+                </div>
+              </div>
+            }
+          >
+            <div style="display:flex;flex-direction:column;gap:8px;max-width:440px;font-size:12px;">
+              <div style="padding:8px 10px;border-radius:8px;border:1px solid rgba(239,68,68,.35);background:rgba(239,68,68,.08);color:#ef4444;word-break:break-word;">
+                {err()}
+              </div>
+              <div style="font-size:11px;opacity:.75;">{ctx.t("limits.errorAuthHint")}</div>
+            </div>
+          </ui.Dialog>
+        )
+      })
     }
 
     function openCard(initial: LimitCard) {
@@ -1116,8 +970,9 @@ export default Plugin.define({
 
         const description = () => {
           const c = current()
-          const source = sourceLabel(c.source, lang())
-          return `${c.org}${c.email ? ` · ${c.email}` : ""} · ${c.checkedAt}${source ? ` · ${source}` : ""}`
+          const age = relativeAge(c.checkedAtMs, now(), lang())
+          const updatedPart = age ? ctx.t("limits.updated", { age }) : c.checkedAt
+          return [c.org, c.email, updatedPart].filter(Boolean).join(" · ")
         }
 
         const handleRefresh = async () => {
@@ -1137,7 +992,7 @@ export default Plugin.define({
             return "font-size:11px;padding:7px 10px;border-radius:8px;border:1px solid rgba(239,68,68,.35);background:rgba(239,68,68,.08);color:#ef4444;"
           }
           if (k === "hot") {
-            return "font-size:11px;padding:7px 10px;border-radius:8px;border:1px solid rgba(245,158,11,.35);background:rgba(245,158,11,.08);color:#f59e0b;"
+            return `font-size:11px;padding:7px 10px;border-radius:8px;border:1px solid rgba(245,158,11,.35);background:rgba(245,158,11,.08);color:${amberText(light())};`
           }
           const border = light() ? "rgba(0,0,0,.1)" : "rgba(255,255,255,.1)"
           const bg = light() ? "rgba(0,0,0,.03)" : "rgba(255,255,255,.03)"
@@ -1152,7 +1007,13 @@ export default Plugin.define({
           if (!extras.value.showZenStats) return false
           const z = zenActivity()
           if (!z) return false
-          return z.budgets.length > 0 || z.today.goTokens > 0 || z.today.zenTokens > 0 || z.today.zenCostUsd > 0
+          return (
+            z.budgets.length > 0 ||
+            z.today.goTokens > 0 ||
+            z.today.zenTokens > 0 ||
+            z.today.zenCostUsd > 0 ||
+            z.today.topModels.length > 0
+          )
         }
 
         return (
@@ -1175,26 +1036,40 @@ export default Plugin.define({
                     />
                   </ui.Tooltip>
                   <ui.Tooltip value={ctx.t("limits.consoleHint")}>
-                    <ui.IconButton
-                      icon="square-arrow-top-right"
-                      label={ctx.t("limits.console")}
+                    <ui.Button
                       variant="neutral"
+                      size="small"
+                      icon="square-arrow-top-right"
                       onClick={() => ctx.system.openExternal(consoleUrl())}
-                    />
+                    >
+                      {ctx.t("limits.console")}
+                    </ui.Button>
                   </ui.Tooltip>
                 </div>
                 <div style="display:flex;align-items:center;gap:8px;">
-                  <ui.Button variant="neutral" icon="refresh" busy={refreshing()} onClick={() => void handleRefresh()}>
+                  <ui.Button
+                    variant="neutral"
+                    icon="refresh"
+                    busy={refreshing()}
+                    onClick={() => void handleRefresh()}
+                  >
                     {ctx.t("limits.refresh")}
                   </ui.Button>
                   <ui.Button variant="contrast" autofocus onClick={dialog.close}>
-                    {ctx.t("limits.ok")}
+                    {ctx.t("limits.close")}
                   </ui.Button>
                 </div>
               </div>
             }
           >
             <div style="display:flex;flex-direction:column;gap:9px;width:100%;box-sizing:border-box;">
+              <Show when={staleError()}>
+                <div
+                  style={`font-size:11px;padding:6px 9px;border-radius:6px;border:1px solid rgba(245,158,11,.35);background:rgba(245,158,11,.08);color:${amberText(light())};`}
+                >
+                  {ctx.t("limits.stale", { error: staleError() })}
+                </div>
+              </Show>
               <For each={current().rows}>
                 {(row: LimitRow) => {
                   const resetLine = () => {
@@ -1205,25 +1080,34 @@ export default Plugin.define({
                   }
                   const rowPace = () => estimateWindowPace(row, now(), lang(), current().snapshots)
                   const elapsed = () => windowElapsedRatio(row, now())
+                  const deltaTooltip = () =>
+                    row.deltaSpanMs && row.deltaSpanMs > 0
+                      ? ctx.t("limits.deltaSpan", { span: span(row.deltaSpanMs, lang()) })
+                      : ctx.t("limits.deltaHint")
                   return (
                     <div style="display:flex;align-items:center;gap:8px;font-size:12px;">
                       <span style="width:24px;opacity:.7;flex-shrink:0;">{windowLabel(row, lang())}</span>
-                      <MiniBar
-                        used={row.used}
-                        width={72}
-                        light={light()}
-                        warnAt={extras.value.warnThreshold}
-                        elapsedRatio={elapsed()}
-                      />
-                      <span style="width:34px;text-align:right;font-variant-numeric:tabular-nums;flex-shrink:0;">
-                        {row.used}%
+                      <ui.Tooltip value={ctx.t("limits.elapsedLegend")}>
+                        <span style="display:inline-flex;align-items:center;">
+                          <MiniBar
+                            used={row.used}
+                            width={72}
+                            light={light()}
+                            mono={extras.value.monoBars}
+                            warnAt={extras.value.warnThreshold}
+                            elapsedRatio={elapsed()}
+                          />
+                        </span>
+                      </ui.Tooltip>
+                      <span style="width:42px;text-align:right;font-variant-numeric:tabular-nums;flex-shrink:0;">
+                        {displayPercent(row.used, display.value.showRemaining)}%
                       </span>
                       <span style="opacity:.6;font-size:11px;min-width:0;flex:1;">
                         {resetLine()}
                         {row.status !== "ok" ? ` · ${row.status}` : ""}
                       </span>
                       <Show when={row.delta1h && row.delta1h > 0}>
-                        <ui.Tooltip value={ctx.t("limits.deltaHint")}>
+                        <ui.Tooltip value={deltaTooltip()}>
                           <span style="font-size:10px;opacity:.6;font-variant-numeric:tabular-nums;flex-shrink:0;">
                             +{row.delta1h}%
                           </span>
@@ -1231,8 +1115,10 @@ export default Plugin.define({
                       </Show>
                       <Show when={rowPace()?.kind === "hot"}>
                         <ui.Tooltip value={ctx.t("limits.paceHint")}>
-                          <span style="font-size:11px;color:#f59e0b;font-variant-numeric:tabular-nums;flex-shrink:0;">
-                            ⚡ ~{span(rowPace()!.timeToFullMs, lang())}
+                          <span
+                            style={`font-size:11px;color:${amberText(light())};font-variant-numeric:tabular-nums;flex-shrink:0;`}
+                          >
+                            ⚡
                           </span>
                         </ui.Tooltip>
                       </Show>
@@ -1240,10 +1126,6 @@ export default Plugin.define({
                   )
                 }}
               </For>
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;opacity:.65;">
-                <span>{tightLine(current().rows, now(), lang())}</span>
-                <span style="font-size:10px;opacity:.75;flex-shrink:0;">{ctx.t("limits.elapsedLegend")}</span>
-              </div>
               <Show when={pace()}>
                 <div style={paceCardStyle()}>{pace()!.text}</div>
               </Show>
@@ -1253,18 +1135,39 @@ export default Plugin.define({
               <Show when={hasZenDetails()}>
                 <div style={zenBoxStyle()}>
                   <div style="font-weight:500;opacity:.85;">{ctx.t("limits.zenTitle")}</div>
-                  <Show when={(zenActivity()?.today.goTokens ?? 0) > 0 || (zenActivity()?.today.zenTokens ?? 0) > 0 || (zenActivity()?.today.zenCostUsd ?? 0) > 0}>
+                  <Show
+                    when={
+                      (zenActivity()?.today.goTokens ?? 0) > 0 ||
+                      (zenActivity()?.today.zenTokens ?? 0) > 0 ||
+                      (zenActivity()?.today.zenCostUsd ?? 0) > 0
+                    }
+                  >
                     <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;opacity:.75;font-variant-numeric:tabular-nums;">
                       <Show when={(zenActivity()?.today.goTokens ?? 0) > 0}>
                         <span>
-                          {ctx.t("limits.todayGo")}: {formatTokensCompact(zenActivity()!.today.goTokens)} · {zenActivity()!.today.goSteps} steps
+                          {ctx.t("limits.todayGo")}: {formatTokensCompact(zenActivity()!.today.goTokens)} ·{" "}
+                          {zenActivity()!.today.goSteps} {ctx.t("limits.steps")}
                         </span>
                       </Show>
-                      <Show when={(zenActivity()?.today.zenTokens ?? 0) > 0 || (zenActivity()?.today.zenCostUsd ?? 0) > 0}>
+                      <Show
+                        when={
+                          (zenActivity()?.today.zenTokens ?? 0) > 0 ||
+                          (zenActivity()?.today.zenCostUsd ?? 0) > 0
+                        }
+                      >
                         <span>
-                          {ctx.t("limits.todayZen")}: {formatUsd(zenActivity()!.today.zenCostUsd)} ({formatTokensCompact(zenActivity()!.today.zenTokens)})
+                          {ctx.t("limits.todayZen")}: {formatUsd(zenActivity()!.today.zenCostUsd)} (
+                          {formatTokensCompact(zenActivity()!.today.zenTokens)})
                         </span>
                       </Show>
+                    </div>
+                  </Show>
+                  <Show when={(zenActivity()?.today.topModels.length ?? 0) > 0}>
+                    <div style="opacity:.65;font-size:10px;font-variant-numeric:tabular-nums;">
+                      {ctx.t("limits.models")}:{" "}
+                      {zenActivity()!
+                        .today.topModels.map((m) => `${m.modelID} (${formatTokensCompact(m.tokens)})`)
+                        .join(" · ")}
                     </div>
                   </Show>
                   <For each={zenActivity()?.budgets ?? []}>
@@ -1273,7 +1176,13 @@ export default Plugin.define({
                       return (
                         <div style="display:flex;align-items:center;gap:8px;opacity:.8;font-variant-numeric:tabular-nums;">
                           <span style="opacity:.7;">{ctx.t("limits.budget")}</span>
-                          <MiniBar used={pct()} width={60} light={light()} warnAt={extras.value.warnThreshold} />
+                          <MiniBar
+                            used={pct()}
+                            width={60}
+                            light={light()}
+                            mono={extras.value.monoBars}
+                            warnAt={extras.value.warnThreshold}
+                          />
                           <span>
                             {formatUsd(budget.spent)} / {formatUsd(budget.limit)}
                           </span>
@@ -1286,6 +1195,12 @@ export default Plugin.define({
                       )
                     }}
                   </For>
+                </div>
+              </Show>
+              <Show when={sourceLabel(current().source, lang())}>
+                <div style="font-size:10px;opacity:.45;display:flex;justify-content:space-between;gap:8px;">
+                  <span>{sourceLabel(current().source, lang())}</span>
+                  <span>{current().checkedAt}</span>
                 </div>
               </Show>
             </div>
@@ -1304,7 +1219,11 @@ export default Plugin.define({
       const result = await refresh(true)
       if (ctx.signal.aborted) return
       if (!result || !result.ok) {
-        ctx.toast.show({ variant: "error", title: result?.error ?? ctx.t("limits.failed") })
+        if (card()?.ok) {
+          openCard(card()!)
+          return
+        }
+        openErrorDialog(result?.error ?? ctx.t("limits.failed"))
         return
       }
       openCard(result)
@@ -1315,7 +1234,7 @@ export default Plugin.define({
       title: ctx.t("command.limits"),
       bind: "ctrl+shift+l",
       slash: { name: "limits" },
-      run: () => showLimits(false),
+      run: () => showLimits(true),
     }))
 
     ctx.add(Command, (): Command => ({
@@ -1360,6 +1279,12 @@ export default Plugin.define({
           keywords: "bars text percent compact progress style",
         },
         {
+          id: "opencode-limits-go-remaining",
+          title: ctx.t("settings.remaining.title"),
+          description: ctx.t("settings.remaining.description"),
+          keywords: "remaining left battery used percent",
+        },
+        {
           id: "opencode-limits-go-labels",
           title: ctx.t("settings.labels.title"),
           description: ctx.t("settings.labels.description"),
@@ -1375,13 +1300,13 @@ export default Plugin.define({
           id: "opencode-limits-go-zenstats",
           title: ctx.t("settings.zenStats.title"),
           description: ctx.t("settings.zenStats.description"),
-          keywords: "zen cost spend budget tokens today",
+          keywords: "zen cost spend budget tokens models today",
         },
         {
           id: "opencode-limits-go-alerts",
           title: ctx.t("settings.alerts.title"),
           description: ctx.t("settings.alerts.description"),
-          keywords: "toast alert notification",
+          keywords: "toast alert notification reset",
         },
         {
           id: "opencode-limits-go-threshold",
@@ -1416,7 +1341,11 @@ export default Plugin.define({
               <ui.Button variant="ghost-muted" onClick={resetSettings}>
                 {ctx.t("settings.reset")}
               </ui.Button>
-              <ui.Button variant="ghost" icon="square-arrow-top-right" onClick={() => ctx.system.openExternal(consoleUrl())}>
+              <ui.Button
+                variant="ghost"
+                icon="square-arrow-top-right"
+                onClick={() => ctx.system.openExternal(consoleUrl())}
+              >
                 {ctx.t("limits.console")}
               </ui.Button>
               <ui.Button variant="neutral" icon="refresh" busy={refreshing()} onClick={() => void refresh(true)}>
@@ -1451,11 +1380,13 @@ export default Plugin.define({
             <LimitsStrip
               card={card()}
               ready={ready()}
+              stale={!!staleError()}
               lang={lang()}
               light={light()}
               showBars={prefs.value.showBars}
               showPercent={strip.value.showPercent}
               showLabels={strip.value.showLabels}
+              showRemaining={display.value.showRemaining}
               monoBars={extras.value.monoBars}
               warnAt={extras.value.warnThreshold}
               visible={visibleWindows()}
@@ -1476,11 +1407,13 @@ export default Plugin.define({
             <LimitsStrip
               card={card()}
               ready={ready()}
+              stale={!!staleError()}
               lang={lang()}
               light={light()}
               showBars={prefs.value.showBars && !input.compact}
               showPercent={strip.value.showPercent || input.compact}
               showLabels={strip.value.showLabels}
+              showRemaining={display.value.showRemaining}
               monoBars={extras.value.monoBars}
               warnAt={extras.value.warnThreshold}
               visible={visibleWindows()}
@@ -1496,13 +1429,19 @@ export default Plugin.define({
       if (prefs.value.placement !== "titlebar") return undefined
       const current = card()
       const l = lang()
+      const rem = display.value.showRemaining
       const rows = current?.ok ? filterStripRows(current.rows, visibleWindows()) : []
       const label = current?.ok
         ? rows
-            .map((r) => (strip.value.showLabels ? `${windowLabel(r, l)} ${r.used}%` : `${r.used}%`))
+            .map((r) => {
+              const pct = displayPercent(r.used, rem)
+              return strip.value.showLabels ? `${windowLabel(r, l)} ${pct}%` : `${pct}%`
+            })
             .join(" · ")
-        : `${l === "ru" ? "лимиты" : "limits"}: ${ready() ? current?.error || "—" : "…"}`
-      const fullTitle = current?.ok ? `${ctx.t("command.limits")}: ${cardText(current, l)}` : `${ctx.t("command.limits")}: ${label}`
+        : `${l === "ru" ? "лимиты" : "limits"}: ${ready() ? shortErrorLabel(current?.error, l) : "…"}`
+      const fullTitle = current?.ok
+        ? `${ctx.t("command.limits")}: ${cardText(current, l)}`
+        : `${ctx.t("command.limits")}: ${current?.error || label}`
       return {
         id: "limits",
         label,
