@@ -5,6 +5,7 @@ import {
   type Locale,
   type TimeFormat,
   WINDOWS,
+  tightestRow,
   windowLabel,
 } from "./types.ts"
 
@@ -26,7 +27,7 @@ export function shortDate(isoOrMs: string | number, timeFormat: TimeFormat = "24
 export function span(ms: number, lang: Locale = "en"): string {
   if (ms <= 0) return lang === "ru" ? "сброс прошёл, обнови" : "reset passed, refresh"
   const m = Math.round(ms / 60_000)
-  if (m < 1) return lang === "ru" ? "меньше минуты" : "< 1m"
+  if (m < 1) return lang === "ru" ? "< 1 мин" : "< 1m"
   const d = Math.floor(m / 1440)
   const h = Math.floor((m % 1440) / 60)
   if (d) return lang === "ru" ? `${d}д ${h}ч` : `${d}d ${h}h`
@@ -131,15 +132,15 @@ export function localizeRows(rows: LimitRow[], now: number, lang: Locale): Limit
 }
 
 export function tightLine(rows: LimitRow[], now = Date.now(), lang: Locale = "en"): string {
-  if (!rows.length) return ""
-  const tight = [...rows].sort((a, b) => b.used - a.used)[0]
+  const tight = tightestRow(rows, now)
+  if (!tight) return ""
   const label = windowLabel(tight, lang)
   const left = Math.max(0, 100 - tight.used)
   const { passed, text } = resetText(tight.resetsAtMs, tight.resetsIn, now, lang)
   if (lang === "ru") {
-    return `Ближе всех: ${label} — ${tight.used}%, запас ${left}%${passed ? ` (${text})` : `, сброс через ${text}`}`
+    return `Риск: ${label} — ${tight.used}%, запас ${left}%${passed ? ` (${text})` : `, сброс через ${text}`}`
   }
-  return `Tightest: ${label} — ${tight.used}%, ${left}% left${passed ? ` (${text})` : `, resets in ${text}`}`
+  return `At risk: ${label} — ${tight.used}%, ${left}% left${passed ? ` (${text})` : `, resets in ${text}`}`
 }
 
 const SOURCE_LABELS: Record<string, { ru: string; en: string }> = {

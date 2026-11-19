@@ -53,9 +53,27 @@ export function normalizeLocale(input?: string | null): Locale {
 
 export const WINDOWS = [
   { key: "rolling", label: "5h", labels: { ru: "5ч", en: "5h" } },
-  { key: "weekly", label: "1w", labels: { ru: "1н", en: "1w" } },
-  { key: "monthly", label: "1m", labels: { ru: "1м", en: "1m" } },
+  { key: "weekly", label: "1w", labels: { ru: "1нед", en: "1w" } },
+  { key: "monthly", label: "1m", labels: { ru: "1мес", en: "1m" } },
 ] as const
+
+export const WINDOW_DURATION_MS: Record<WindowKey, number> = {
+  rolling: 5 * 3_600_000,
+  weekly: 7 * 86_400_000,
+  monthly: 30 * 86_400_000,
+}
+
+export function windowElapsedRatio(row: Pick<LimitRow, "key" | "label" | "resetsAtMs">, now = Date.now()): number | null {
+  const key = rowWindowKey(row)
+  if (!key) return null
+  const resetsAtMs = row.resetsAtMs ?? 0
+  if (resetsAtMs <= 0) return null
+  const durationMs = WINDOW_DURATION_MS[key]
+  const remainingMs = resetsAtMs - now
+  if (remainingMs < 0) return 1
+  if (remainingMs > durationMs) return 0
+  return Math.min(1, Math.max(0, (durationMs - remainingMs) / durationMs))
+}
 
 export const WINDOW_BY_KEY = new Map<string, (typeof WINDOWS)[number]>(WINDOWS.map((w) => [w.key, w]))
 export const WINDOW_BY_LABEL = new Map<string, (typeof WINDOWS)[number]>(
@@ -87,20 +105,35 @@ export function filterStripRows(rows: readonly LimitRow[], visible: VisibleWindo
   return filtered.length ? filtered : [...rows]
 }
 
+// Risk ranks by projected usage at reset, so a 5h window about to reset does not hide
+// a weekly window that will actually run out first.
+function riskRank(row: LimitRow, now: number): number {
+  const ratio = windowElapsedRatio(row, now)
+  return ratio !== null && ratio >= 0.08 ? row.used / ratio : row.used
+}
+
+export function tightestRow(rows: readonly LimitRow[], now = Date.now()): LimitRow | undefined {
+  if (!rows.length) return undefined
+  return [...rows].sort((a, b) => {
+    const risk = riskRank(b, now) - riskRank(a, now)
+    if (risk !== 0) return risk
+    if (b.used !== a.used) return b.used - a.used
+    const ra = a.resetsAtMs && a.resetsAtMs > 0 ? a.resetsAtMs : Number.MAX_SAFE_INTEGER
+    const rb = b.resetsAtMs && b.resetsAtMs > 0 ? b.resetsAtMs : Number.MAX_SAFE_INTEGER
+    return ra - rb
+  })[0]
+}
+
 export function selectStripRows(
   rows: readonly LimitRow[],
   visible: VisibleWindows,
   mode: StripMode = "selected",
+  now = Date.now(),
 ): LimitRow[] {
   if (!rows.length) return []
   if (mode === "tightest") {
-    const sorted = [...rows].sort((a, b) => {
-      if (b.used !== a.used) return b.used - a.used
-      const ra = a.resetsAtMs && a.resetsAtMs > 0 ? a.resetsAtMs : Number.MAX_SAFE_INTEGER
-      const rb = b.resetsAtMs && b.resetsAtMs > 0 ? b.resetsAtMs : Number.MAX_SAFE_INTEGER
-      return ra - rb
-    })
-    return [sorted[0]]
+    const tight = tightestRow(rows, now)
+    return tight ? [tight] : []
   }
   return filterStripRows(rows, visible)
 }
@@ -108,6 +141,11 @@ export function selectStripRows(
 export function shouldHideStrip(rows: readonly LimitRow[], autoHideBelow = 0): boolean {
   if (autoHideBelow <= 0 || !rows.length) return false
   return rows.every((r) => r.used < autoHideBelow && r.status !== "limited")
+}
+
+export function isAuthError(text: string | undefined): boolean {
+  const raw = (text ?? "").toLowerCase()
+  return raw.includes("401") || raw.includes("403") || raw.includes("unauthorized") || raw.includes("forbidden")
 }
 
 export function formatError(code: ErrorCode | undefined, detail: string | undefined, lang: Locale = "en"): string {
@@ -125,6 +163,11 @@ export function formatError(code: ErrorCode | undefined, detail: string | undefi
       return lang === "ru" ? `Окно ${label}: некорректный процент` : `Window ${label}: invalid percent`
     }
     case "FETCH_FAILED": {
+      if (isAuthError(detail)) {
+        return lang === "ru"
+          ? "Токен OpenCode Go истёк или неверен. Выполни: opencode auth login (или обнови OPENCODE_API_KEY)"
+          : "OpenCode Go token is expired or invalid. Run: opencode auth login (or refresh OPENCODE_API_KEY)"
+      }
       const cause = detail || (lang === "ru" ? "нет доступных учётных данных" : "no credentials available")
       return lang === "ru" ? `Не удалось получить лимиты: ${cause}` : `Failed to load limits: ${cause}`
     }

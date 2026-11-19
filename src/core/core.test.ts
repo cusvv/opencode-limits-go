@@ -36,7 +36,7 @@ test("span: past reset is reported as passed, not as 'less than a minute'", () =
 })
 
 test("span: formats minutes, hours and days in EN and RU", () => {
-  assert.equal(span(10_000, "ru"), "меньше минуты")
+  assert.equal(span(10_000, "ru"), "< 1 мин")
   assert.equal(span(10_000, "en"), "< 1m")
   assert.equal(span(30_000, "ru"), "1м")
   assert.equal(span(12 * 60_000, "en"), "12m")
@@ -107,11 +107,11 @@ test("cardText, tightLine, alertMessage, cardDetail format cleanly in EN and RU"
     "en",
   )
   const card = { ...emptyCard(""), ok: true, checkedAt: "10:00:00", source: "integration:key", rows }
-  assert.equal(cardText(card, "ru"), "5ч 5% · 1м 44%")
+  assert.equal(cardText(card, "ru"), "5ч 5% · 1мес 44%")
   assert.equal(cardText(card, "en"), "5h 5% · 1m 44%")
-  assert.equal(tightLine(rows, NOW, "ru"), "Ближе всех: 1м — 44%, запас 56% (сброс прошёл, обнови)")
-  assert.equal(tightLine(rows, NOW, "en"), "Tightest: 1m — 44%, 56% left (reset passed, refresh)")
-  assert.equal(alertMessage(rows[1], NOW, "ru"), "Лимит 1м: 44% (сброс прошёл, обнови)")
+  assert.equal(tightLine(rows, NOW, "ru"), "Риск: 1мес — 44%, запас 56% (сброс прошёл, обнови)")
+  assert.equal(tightLine(rows, NOW, "en"), "At risk: 1m — 44%, 56% left (reset passed, refresh)")
+  assert.equal(alertMessage(rows[1], NOW, "ru"), "Лимит 1мес: 44% (сброс прошёл, обнови)")
   assert.equal(alertMessage(rows[1], NOW, "en"), "Limit 1m: 44% (reset passed, refresh)")
   assert.equal(sourceLabel("integration:key", "en"), "OpenCode integration (API key)")
   const detailRu = cardDetail(card, NOW, "ru")
@@ -288,14 +288,14 @@ test("cardDetail appends smart pace line when significant", async () => {
   const detailEn = cardDetail(card, now, "en")
   const detailRu = cardDetail(card, now, "ru")
   assert.ok(detailEn.includes("Pace (1w):"))
-  assert.ok(detailRu.includes("Темп (1н):"))
+  assert.ok(detailRu.includes("Темп (1нед):"))
 })
 
 test("filterStripRows selects enabled windows and falls back if none are selected", async () => {
   const { filterStripRows, rowWindowKey } = await import("./index.ts")
   const rows = [
     { key: "rolling" as const, label: "5h", used: 12, status: "ok", resetsAt: "", resetsIn: "" },
-    { label: "1н", used: 40, status: "ok", resetsAt: "", resetsIn: "" },
+    { label: "1нед", used: 40, status: "ok", resetsAt: "", resetsIn: "" },
     { key: "monthly" as const, label: "1m", used: 65, status: "ok", resetsAt: "", resetsIn: "" },
   ]
 

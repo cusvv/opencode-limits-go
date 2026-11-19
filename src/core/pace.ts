@@ -1,4 +1,13 @@
-import { type LimitRow, type Locale, type UsageSnapshot, type WindowKey, rowWindowKey, windowLabel } from "./types.ts"
+import {
+  type LimitRow,
+  type Locale,
+  type UsageSnapshot,
+  type WindowKey,
+  WINDOW_DURATION_MS,
+  rowWindowKey,
+  windowElapsedRatio,
+  windowLabel,
+} from "./types.ts"
 import { span } from "./format.ts"
 
 export type PaceKind = "none" | "steady" | "hot" | "exhausted"
@@ -15,25 +24,7 @@ export type WindowPace = {
   pctPerHour?: number
 }
 
-const WINDOW_DURATION_MS: Record<WindowKey, number> = {
-  rolling: 5 * 3_600_000,
-  weekly: 7 * 86_400_000,
-  monthly: 30 * 86_400_000,
-}
-
-export function windowElapsedRatio(row: Pick<LimitRow, "key" | "label" | "resetsAtMs">, now = Date.now()): number | null {
-  const key = rowWindowKey(row)
-  if (!key) return null
-  const resetsAtMs = row.resetsAtMs ?? 0
-  if (resetsAtMs <= 0) return null
-  const durationMs = WINDOW_DURATION_MS[key]
-  const remainingMs = resetsAtMs - now
-  if (remainingMs < 0) return 1
-  if (remainingMs > durationMs) return 0
-  return Math.min(1, Math.max(0, (durationMs - remainingMs) / durationMs))
-}
-
-const MAX_HISTORY = 72
+const MAX_HISTORY = 240
 const MIN_HISTORY_INTERVAL_MS = 5 * 60_000
 
 export function recordUsageSnapshot(
@@ -92,7 +83,7 @@ export function recentWindowDelta(
 export function selectSnapshotsForClient(
   history: readonly UsageSnapshot[],
   now = Date.now(),
-  limit = 24,
+  limit = 72,
 ): UsageSnapshot[] {
   if (history.length <= limit) return [...history]
   const picked = new Map<number, UsageSnapshot>()
@@ -185,7 +176,8 @@ export function estimateWindowPace(
     useRecent ? row.used + (recent!.pctPerHour * remainingMs) / 3_600_000 : avgRate * 100,
   )
 
-  if ((elapsedRatio >= 0.08 || row.used >= 35 || useRecent) && row.used >= 10 && rate >= 1.2 && projectedPct >= 110 && timeToFullMs < remainingMs) {
+  // projectedPct 100-120 is already a risk: it must not fall through to "steady ~100% by reset".
+  if ((elapsedRatio >= 0.08 || row.used >= 35 || useRecent) && row.used >= 10 && rate >= 1 && projectedPct >= 105 && timeToFullMs < remainingMs) {
     return {
       kind: "hot",
       key,
@@ -214,6 +206,57 @@ export function estimateWindowPace(
   }
 
   return null
+}
+
+export type WindowVerdictKind = "exhausted" | "tight" | "fits"
+
+export type WindowVerdict = {
+  kind: WindowVerdictKind
+  text: string
+  timeToFullMs?: number
+  remainingMs: number
+}
+
+// One sentence per window for the daily decision: wait, slow down, or keep going.
+export function windowVerdict(
+  row: LimitRow,
+  now = Date.now(),
+  lang: Locale = "en",
+  history?: readonly UsageSnapshot[],
+): WindowVerdict | null {
+  const pace = estimateWindowPace(row, now, lang, history)
+  if (!pace) return null
+  if (pace.kind === "exhausted") {
+    return {
+      kind: "exhausted",
+      remainingMs: pace.remainingMs,
+      text:
+        lang === "ru"
+          ? `${pace.label}: лимит исчерпан, сброс через ${span(pace.remainingMs, lang)}`
+          : `${pace.label}: limit reached, resets in ${span(pace.remainingMs, lang)}`,
+    }
+  }
+  if (pace.timeToFullMs < pace.remainingMs) {
+    return {
+      kind: "tight",
+      timeToFullMs: pace.timeToFullMs,
+      remainingMs: pace.remainingMs,
+      text:
+        lang === "ru"
+          ? `${pace.label}: ~${span(pace.timeToFullMs, lang)} до 100%, сброс через ${span(pace.remainingMs, lang)}`
+          : `${pace.label}: ~${span(pace.timeToFullMs, lang)} to 100%, resets in ${span(pace.remainingMs, lang)}`,
+    }
+  }
+  const projected = Math.min(100, Math.max(0, pace.projectedPct))
+  return {
+    kind: "fits",
+    timeToFullMs: pace.timeToFullMs,
+    remainingMs: pace.remainingMs,
+    text:
+      lang === "ru"
+        ? `${pace.label}: доживёт до сброса (~${projected}% к сбросу)`
+        : `${pace.label}: holds until reset (~${projected}% by reset)`,
+  }
 }
 
 export function paceSummary(
@@ -263,12 +306,22 @@ export function paceSummary(
     }
   }
 
+  if (steady.projectedPct >= 100) {
+    return {
+      kind: "hot",
+      text:
+        lang === "ru"
+          ? `Темп (${steady.label}): к сбросу ожидается ~${steady.projectedPct}% — лимит может кончиться`
+          : `Pace (${steady.label}): projected ~${steady.projectedPct}% by reset — the limit may run out`,
+    }
+  }
+
   return {
     kind: "steady",
     text:
       lang === "ru"
-        ? `Темп (${steady.label}): ровный (~${Math.min(steady.projectedPct, 100)}% к сбросу)`
-        : `Pace (${steady.label}): steady (~${Math.min(steady.projectedPct, 100)}% by reset)`,
+        ? `Темп (${steady.label}): ровный (~${steady.projectedPct}% к сбросу)`
+        : `Pace (${steady.label}): steady (~${steady.projectedPct}% by reset)`,
   }
 }
 

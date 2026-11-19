@@ -5,9 +5,9 @@ export function alertMessage(row: LimitRow, now = Date.now(), lang: Locale = "en
   const label = windowLabel(row, lang)
   const { passed, text } = resetText(row.resetsAtMs, row.resetsIn, now, lang)
   if (lang === "ru") {
-    return `Лимит ${label}: ${row.used}%${passed ? ` (${text})` : `, сброс через ${text}`}`
+    return `Лимит ${label}: ${row.used}%${passed ? ` (${text})` : `, сброс: ${text}`}`
   }
-  return `Limit ${label}: ${row.used}%${passed ? ` (${text})` : `, resets in ${text}`}`
+  return `Limit ${label}: ${row.used}%${passed ? ` (${text})` : `, resets: ${text}`}`
 }
 
 // Track the highest threshold seen per window so notifications fire once per crossing and reset after drop.
@@ -42,8 +42,8 @@ export function recoveredAlerts(rows: LimitRow[], wasExhausted: Set<string>): Li
 export function resetAlertMessage(row: LimitRow, lang: Locale = "en"): string {
   const label = windowLabel(row, lang)
   return lang === "ru"
-    ? `Лимит ${label} сброшен — OpenCode Go снова доступен`
-    : `${label} limit reset — OpenCode Go is available again`
+    ? `Лимит ${label} сброшен — сейчас ${row.used}%`
+    : `${label} limit reset — now at ${row.used}%`
 }
 
 export type BurnSpike = {

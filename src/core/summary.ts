@@ -1,6 +1,6 @@
-import { type LimitCard, type Locale, type VisibleWindows, filterStripRows, windowLabel } from "./types.ts"
+import { type LimitCard, type Locale, type VisibleWindows, filterStripRows, tightestRow, windowLabel } from "./types.ts"
 import { bar, displayPercent, resetText, shortErrorLabel, sourceLabel, span, tightLine } from "./format.ts"
-import { estimateWindowPace, paceSummary } from "./pace.ts"
+import { estimateWindowPace, paceSummary, windowVerdict } from "./pace.ts"
 
 export function formatTuiSidebar(
   card: LimitCard,
@@ -9,22 +9,31 @@ export function formatTuiSidebar(
   lang: Locale = "en",
   now = Date.now(),
   showRemaining = false,
+  warnAt = 80,
+  plain = false,
+  compact = false,
 ): string {
   if (!card.ok) return `${lang === "ru" ? "лимиты" : "limits"}: ${shortErrorLabel(card.error, lang)}`
-  return filterStripRows(card.rows, visible)
+  const all = filterStripRows(card.rows, visible)
+  const rows = compact ? [tightestRow(all, now) ?? all[0]] : all
+  return rows
     .map((row) => {
       const lbl = windowLabel(row, lang)
       const pct = displayPercent(row.used, showRemaining)
-      const hot = estimateWindowPace(row, now, lang, card.snapshots)?.kind === "hot" ? "⚡" : ""
+      const hot = !plain && estimateWindowPace(row, now, lang, card.snapshots)?.kind === "hot" ? "⚡" : ""
       let resetHint = ""
-      if ((row.used >= 100 || row.status === "limited") && row.resetsAtMs && row.resetsAtMs > now) {
+      if (row.resetsAtMs && row.resetsAtMs > now && (row.used >= 100 || row.status === "limited" || (warnAt > 0 && row.used >= warnAt))) {
         resetHint = ` (${span(row.resetsAtMs - now, lang)})`
       }
-      return showBars
-        ? `${lbl} ${bar(row.used, 4)} ${pct}%${hot}${resetHint}`
-        : `${lbl} ${pct}%${hot}${resetHint}`
+      const renderedBar = showBars ? ` ${plain ? asciiBar(displayPercent(row.used, showRemaining), 4) : bar(displayPercent(row.used, showRemaining), 4)}` : ""
+      return `${lbl}${renderedBar} ${pct}%${hot}${resetHint}`
     })
     .join(" · ")
+}
+
+function asciiBar(percent: number, width: number): string {
+  const filled = Math.round((width * Math.min(Math.max(percent, 0), 100)) / 100)
+  return `${"#".repeat(filled)}${"-".repeat(width - filled)}`
 }
 
 export function cardDetail(
@@ -32,6 +41,7 @@ export function cardDetail(
   now = Date.now(),
   lang: Locale = "en",
   extraLines: readonly string[] = [],
+  showRemaining = false,
 ): string {
   const source = sourceLabel(card.source, lang)
   const checkedPrefix = lang === "ru" ? "Проверено" : "Checked"
@@ -45,12 +55,18 @@ export function cardDetail(
         ? `${row.resetsAt} (через ${text})`
         : `${row.resetsAt} (in ${text})`
     const deltaPart = row.delta1h && row.delta1h > 0 ? `  +${row.delta1h}%` : ""
-    return `${label.padStart(2)}: ${String(row.used).padStart(3)}%  ${bar(row.used)}  ${resetPart}${deltaPart}${row.status !== "ok" ? `  [${row.status}]` : ""}`
+    const statusPart = row.status !== "ok" ? `  [${row.status}]` : ""
+    return `${label.padStart(4)}: ${String(displayPercent(row.used, showRemaining)).padStart(3)}%  ${bar(displayPercent(row.used, showRemaining))}  ${resetPart}${deltaPart}${statusPart}`
   })
   const tightLineStr = tightLine(card.rows, now, lang)
   const pace = paceSummary(card.rows, now, lang, card.snapshots)
+  const verdicts = card.rows
+    .map((row) => windowVerdict(row, now, lang, card.snapshots))
+    .filter((v): v is NonNullable<typeof v> => v !== null && v.kind !== "fits")
+    .map((v) => v.text)
   const lines = [header, "", ...rows, "", tightLineStr]
   if (pace) lines.push(pace.text)
+  for (const verdict of verdicts) lines.push(verdict)
   for (const extra of extraLines) {
     if (extra) lines.push(extra)
   }
