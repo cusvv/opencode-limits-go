@@ -1759,6 +1759,7 @@ export default Plugin.define({
                 <div style={paceCardStyle()}>
                   {pace()!.text}
                   <Show when={showZenLeft()}> · {zenLeft()}</Show>
+                  <div style="opacity:.7;margin-top:3px;">{t("limits.paceExplain")}</div>
                 </div>
               </Show>
               <Show when={custom.value.dialogSparkline}>

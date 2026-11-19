@@ -80,16 +80,16 @@ Restart **OpenCode Desktop** (or run `/reload` in open TUI sessions).
 ```sh
 # macOS / Linux
 git clone https://github.com/cusvv/opencode-limits-go.git ~/.config/opencode/local-plugins/opencode-limits-go
-cd ~/.config/opencode/local-plugins/opencode-limits-go && npm install
+cd ~/.config/opencode/local-plugins/opencode-limits-go && npm install --omit=dev
 ```
 
 ```powershell
 # Windows (PowerShell)
 git clone https://github.com/cusvv/opencode-limits-go.git "$env:USERPROFILE\.config\opencode\local-plugins\opencode-limits-go"
-cd "$env:USERPROFILE\.config\opencode\local-plugins\opencode-limits-go"; npm install
+cd "$env:USERPROFILE\.config\opencode\local-plugins\opencode-limits-go"; npm install --omit=dev
 ```
 
-`npm install` is required for the TUI entrypoint (`solid-js` and `@opentui/solid`). The Desktop GUI bundle is prebuilt.
+`npm install --omit=dev` is required for the TUI entrypoint (`solid-js` and `@opentui/solid`). The Desktop GUI bundle is prebuilt.
 
 ### Option 3: Release archive
 
@@ -97,7 +97,7 @@ Download `opencode-limits-go.zip` or `opencode-limits-go.tar.gz` plus `SHA256SUM
 - **Windows**: `%USERPROFILE%\.config\opencode\local-plugins\opencode-limits-go`
 - **macOS / Linux**: `~/.config/opencode/local-plugins/opencode-limits-go`
 
-Then run `npm install` in that directory, as for the git clone.
+Then run `npm install --omit=dev` in that directory, as for the git clone.
 
 ### Enable in `opencode.json` (Options 2 & 3)
 
@@ -185,7 +185,7 @@ A healthy response has `"ok": true` and a non-empty `rows` array. `"ok": false` 
 
 **Plugin not listed in `opencode plugin list`**
 - Check the `plugins` entry and restart the app. Local installs must point at the directory containing `package.json`.
-- Run `npm install` in the plugin directory if the TUI strip never appears but Desktop works.
+- Run `npm install --omit=dev` in the plugin directory if the TUI strip never appears but Desktop works.
 
 **`NO_TOKEN` / `401` / `403`**
 - Run `opencode auth login`, or set `OPENCODE_API_KEY` / `OPENCODE_GO_API_KEY` and restart.
