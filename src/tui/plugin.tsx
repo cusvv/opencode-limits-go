@@ -145,12 +145,12 @@ export default Plugin.define({
 
       for (const row of result.rows) {
         const verdict = windowVerdict(row, now, lang(), result.snapshots)
-        if (!verdict || verdict.kind === "fits") continue
+        if (!verdict || verdict.kind !== "tight") continue
         const id = row.key ?? row.label
         const signature = String(row.resetsAtMs ?? 0)
         if (risk[id] === signature) continue
         risk[id] = signature
-        notify(verdict.text, verdict.kind === "exhausted" ? "error" : "warning")
+        notify(verdict.text, "warning")
       }
 
       if (spikeAt() > 0 && now - lastSpikeAlertAt > 30 * 60_000) {

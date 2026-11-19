@@ -4,8 +4,10 @@ export function redactSecrets(text: string): string {
   return text
     .replace(/Bearer\s+[^\s"'`]+/gi, "Bearer [REDACTED]")
     .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g, "[REDACTED]")
-    .replace(/\b(?:st|rt|sk|oc|pat|gho|ghp|gsk|xai|AIza|AKIA)_?[A-Za-z0-9._-]{6,}/gi, "[REDACTED]")
+    .replace(/\b(?:st|rt|sk|oc|pat|gho|ghp|gsk|xai)_[A-Za-z0-9._-]{6,}/gi, "[REDACTED]")
     .replace(/\bsk-[A-Za-z0-9._-]{8,}/gi, "[REDACTED]")
+    .replace(/\bAIza[0-9A-Za-z_-]{20,}/g, "[REDACTED]")
+    .replace(/\bAKIA[0-9A-Z]{16,}/g, "[REDACTED]")
     .replace(/\b(token|access_token|api_key|apikey|key)=([^&\s"'`]+)/gi, "$1=[REDACTED]")
 }
 

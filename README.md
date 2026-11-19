@@ -93,7 +93,7 @@ cd "$env:USERPROFILE\.config\opencode\local-plugins\opencode-limits-go"; npm ins
 
 ### Option 3: Release archive
 
-Download `opencode-limits-go.zip` or `opencode-limits-go.tar.gz` plus `SHA256SUMS` from [Releases](https://github.com/cusvv/opencode-limits-go/releases), verify, extract to:
+Download `opencode-limits-go.zip` or `opencode-limits-go.tar.gz` plus `SHA256SUMS` from [Releases](https://github.com/cusvv/opencode-limits-go/releases), run `sha256sum -c SHA256SUMS`, and extract to:
 - **Windows**: `%USERPROFILE%\.config\opencode\local-plugins\opencode-limits-go`
 - **macOS / Linux**: `~/.config/opencode/local-plugins/opencode-limits-go`
 

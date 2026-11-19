@@ -532,12 +532,12 @@ export default Plugin.define({
             }
             for (const row of result.rows) {
               const verdict = windowVerdict(row, now, currentLang, result.snapshots)
-              if (!verdict || verdict.kind === "fits") continue
+              if (!verdict || verdict.kind !== "tight") continue
               const id = row.key ?? row.label
               const signature = String(row.resetsAtMs ?? 0)
               if (riskNotified.get(id) === signature) continue
               riskNotified.set(id, signature)
-              notify(verdict.text, verdict.kind === "exhausted" ? "error" : "default")
+              notify(verdict.text, "default")
             }
             if (custom.value.burnSpikePct > 0 && now - lastSpikeAlertAt > 30 * 60_000) {
               const spike = detectBurnSpike(result.rows, result.snapshots, custom.value.burnSpikePct, now)
