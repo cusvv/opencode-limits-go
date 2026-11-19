@@ -3,31 +3,45 @@ import {
   type LimitCard,
   type LimitRow,
   type Locale,
+  type StripMode,
+  type UsageSnapshot,
   type VisibleWindows,
+  buildSparklinePoints,
   displayPercent,
   estimateWindowPace,
-  filterStripRows,
+  selectStripRows,
   shortErrorLabel,
   span,
+  windowElapsedRatio,
   windowLabel,
 } from "../model.ts"
+import type { BarPalette, StripDensity, StripResetMode } from "./stores.ts"
 
 export function amberText(light: boolean): string {
   return light ? "#b45309" : "#f59e0b"
 }
 
-export function tone(used: number, opts?: { mono?: boolean; light?: boolean; warnAt?: number }): string {
+export function tone(
+  used: number,
+  opts?: { palette?: BarPalette; mono?: boolean; light?: boolean; warnAt?: number },
+): string {
+  const palette: BarPalette = opts?.palette ?? (opts?.mono ? "mono" : "traffic")
+  const neutral = opts?.light ? "rgba(0,0,0,.45)" : "rgba(255,255,255,.58)"
   if (used >= 100) return "#ef4444"
+  if (palette === "stealth") return neutral
   const warn = opts?.warnAt ?? 80
   if (warn > 0 && used >= warn) return "#f59e0b"
-  if (opts?.mono) return opts.light ? "rgba(0,0,0,.45)" : "rgba(255,255,255,.58)"
+  if (palette === "mono") return neutral
+  if (palette === "calm") return opts?.light ? "#2563eb" : "#3b82f6"
   return "#22c55e"
 }
 
 export function MiniBar(props: {
   used: number
   width?: number
+  height?: number
   light: boolean
+  palette?: BarPalette
   mono?: boolean
   warnAt?: number
   elapsedRatio?: number | null
@@ -41,10 +55,10 @@ export function MiniBar(props: {
   }
   return (
     <span
-      style={`position:relative;display:inline-block;width:${props.width ?? 32}px;height:5px;background:${track()};border-radius:999px;overflow:hidden;vertical-align:middle;`}
+      style={`position:relative;display:inline-block;width:${props.width ?? 32}px;height:${props.height ?? 5}px;background:${track()};border-radius:999px;overflow:hidden;vertical-align:middle;`}
     >
       <span
-        style={`display:block;height:100%;width:${widthPct()}%;background:${tone(props.used, { mono: props.mono, light: props.light, warnAt: props.warnAt })};`}
+        style={`display:block;height:100%;width:${widthPct()}%;background:${tone(props.used, { palette: props.palette, mono: props.mono, light: props.light, warnAt: props.warnAt })};`}
       />
       <Show when={tickPct() !== null}>
         <span
@@ -52,6 +66,58 @@ export function MiniBar(props: {
         />
       </Show>
     </span>
+  )
+}
+
+export function Sparkline(props: {
+  snapshots: readonly UsageSnapshot[] | undefined
+  light: boolean
+  label: string
+  palette?: BarPalette
+  warnAt?: number
+}) {
+  const width = 260
+  const height = 28
+  const data = () => buildSparklinePoints(props.snapshots, "rolling", width, height)
+  const strokeColor = () => {
+    const d = data()
+    if (!d) return "#22c55e"
+    return tone(d.max, { palette: props.palette, light: props.light, warnAt: props.warnAt })
+  }
+  const boxStyle = () => {
+    const border = props.light ? "rgba(0,0,0,.09)" : "rgba(255,255,255,.09)"
+    const bg = props.light ? "rgba(0,0,0,.02)" : "rgba(255,255,255,.02)"
+    return `display:flex;flex-direction:column;gap:4px;padding:6px 10px;border-radius:8px;border:1px solid ${border};background:${bg};`
+  }
+
+  return (
+    <Show when={data()}>
+      {(d) => (
+        <div style={boxStyle()}>
+          <div style="display:flex;align-items:center;justify-content:space-between;font-size:10px;opacity:.65;font-variant-numeric:tabular-nums;">
+            <span>{props.label}</span>
+            <span>
+              {d().min}% → {d().max}%
+            </span>
+          </div>
+          <svg
+            viewBox={`0 0 ${width} ${height}`}
+            preserveAspectRatio="none"
+            style="width:100%;height:26px;display:block;overflow:visible;"
+          >
+            <polygon points={d().area} fill={strokeColor()} fill-opacity="0.14" />
+            <polyline
+              points={d().polyline}
+              fill="none"
+              stroke={strokeColor()}
+              stroke-width="1.6"
+              stroke-linejoin="round"
+              stroke-linecap="round"
+            />
+          </svg>
+        </div>
+      )}
+    </Show>
   )
 }
 
@@ -66,6 +132,15 @@ export function SectionDivider(props: { label: string; light: boolean }) {
   )
 }
 
+const DENSITY_METRICS: Record<
+  StripDensity,
+  { fontSize: number; gapTop: number; gapBottom: number; barTop: number; barBottom: number; barHeight: number }
+> = {
+  compact: { fontSize: 10, gapTop: 6, gapBottom: 8, barTop: 18, barBottom: 24, barHeight: 4 },
+  normal: { fontSize: 11, gapTop: 8, gapBottom: 12, barTop: 24, barBottom: 32, barHeight: 5 },
+  wide: { fontSize: 12, gapTop: 10, gapBottom: 14, barTop: 34, barBottom: 44, barHeight: 6 },
+}
+
 export function LimitsStrip(props: {
   card: LimitCard | null
   ready: boolean
@@ -76,27 +151,34 @@ export function LimitsStrip(props: {
   showPercent: boolean
   showLabels: boolean
   showRemaining?: boolean
-  monoBars?: boolean
+  palette?: BarPalette
+  density?: StripDensity
+  stripMode?: StripMode
+  stripReset?: StripResetMode
+  showPaceIcon?: boolean
+  showElapsedTick?: boolean
   warnAt?: number
   visible: VisibleWindows
   variant: "bottom" | "top"
   preview?: boolean
   onOpen: () => void
 }) {
-  const rows = () => filterStripRows(props.card?.rows ?? [], props.visible)
+  const rows = () => selectStripRows(props.card?.rows ?? [], props.visible, props.stripMode ?? "selected")
   const effBars = () => props.showBars
   const effPercent = () => props.showPercent || !effBars()
   const prefix = () => (props.lang === "ru" ? "лимиты" : "limits")
+  const metrics = () => DENSITY_METRICS[props.density ?? "normal"]
 
   const buttonStyle = () => {
+    const m = metrics()
     const cursor = props.preview ? "default" : "pointer"
     const opacity = props.stale ? "opacity:.72;" : ""
     if (props.variant === "top") {
       const border = props.light ? "rgba(0,0,0,.12)" : "rgba(255,255,255,.12)"
       const bg = props.light ? "rgba(0,0,0,.04)" : "rgba(255,255,255,.05)"
-      return `background:${bg};border:1px solid ${border};border-radius:6px;margin:0;color:inherit;font:inherit;cursor:${cursor};display:inline-flex;align-items:center;gap:8px;padding:4px 8px;font-size:11px;line-height:1.2;white-space:nowrap;${opacity}`
+      return `background:${bg};border:1px solid ${border};border-radius:6px;margin:0;color:inherit;font:inherit;cursor:${cursor};display:inline-flex;align-items:center;gap:${m.gapTop}px;padding:4px 8px;font-size:${m.fontSize}px;line-height:1.2;white-space:nowrap;${opacity}`
     }
-    return `background:transparent;border:0;margin:0;color:inherit;font:inherit;cursor:${cursor};display:inline-flex;align-items:center;gap:12px;padding:3px 10px;font-size:11px;white-space:nowrap;${opacity}`
+    return `background:transparent;border:0;margin:0;color:inherit;font:inherit;cursor:${cursor};display:inline-flex;align-items:center;gap:${m.gapBottom}px;padding:3px 10px;font-size:${m.fontSize}px;white-space:nowrap;${opacity}`
   }
 
   return (
@@ -113,12 +195,23 @@ export function LimitsStrip(props: {
           {(row: LimitRow) => {
             const nowMs = () => props.card?.checkedAtMs || Date.now()
             const hot = () =>
+              (props.showPaceIcon ?? true) &&
               estimateWindowPace(row, nowMs(), props.lang, props.card?.snapshots)?.kind === "hot"
-            const exhaustedReset = () => {
-              if (row.used < 100 && row.status !== "limited") return ""
-              if (!row.resetsAtMs || row.resetsAtMs <= nowMs()) return ""
-              return span(row.resetsAtMs - nowMs(), props.lang)
+            const elapsed = () => (props.showElapsedTick ? windowElapsedRatio(row, nowMs()) : null)
+            const resetHint = () => {
+              const mode = props.stripReset ?? "exhausted"
+              if (mode === "never") return ""
+              const isExhausted = row.used >= 100 || row.status === "limited"
+              const warn = props.warnAt ?? 80
+              const isWarn = warn > 0 && row.used >= warn
+              if (mode === "exhausted" && !isExhausted) return ""
+              if (mode === "warn" && !isExhausted && !isWarn) return ""
+              if (row.resetsAtMs && row.resetsAtMs > nowMs()) {
+                return span(row.resetsAtMs - nowMs(), props.lang)
+              }
+              return props.preview && row.resetsIn ? row.resetsIn : ""
             }
+            const resetColor = () => (row.used >= 100 || row.status === "limited" ? "#ef4444" : "inherit")
             return (
               <span style="display:inline-flex;align-items:center;gap:5px;">
                 <Show when={props.showLabels}>
@@ -127,10 +220,12 @@ export function LimitsStrip(props: {
                 <Show when={effBars()}>
                   <MiniBar
                     used={row.used}
-                    width={props.variant === "top" ? 24 : 32}
+                    width={props.variant === "top" ? metrics().barTop : metrics().barBottom}
+                    height={metrics().barHeight}
                     light={props.light}
-                    mono={props.monoBars}
+                    palette={props.palette}
                     warnAt={props.warnAt}
+                    elapsedRatio={elapsed()}
                   />
                 </Show>
                 <Show when={effPercent()}>
@@ -138,9 +233,11 @@ export function LimitsStrip(props: {
                     {displayPercent(row.used, props.showRemaining)}%
                   </span>
                 </Show>
-                <Show when={exhaustedReset()}>
-                  <span style="color:#ef4444;font-size:10px;font-variant-numeric:tabular-nums;">
-                    ({exhaustedReset()})
+                <Show when={resetHint()}>
+                  <span
+                    style={`color:${resetColor()};opacity:${row.used >= 100 ? "1" : ".65"};font-size:${Math.max(9, metrics().fontSize - 1)}px;font-variant-numeric:tabular-nums;`}
+                  >
+                    ({resetHint()})
                   </span>
                 </Show>
                 <Show when={hot()}>
