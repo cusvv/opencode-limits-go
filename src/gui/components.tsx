@@ -178,7 +178,7 @@ export function LimitsStrip(props: {
     const summary = rows()
       .map((row) => {
         const pct = displayPercent(row.used, props.showRemaining)
-        const reset = row.resetsAtMs ? `, ${span(row.resetsAtMs - (props.card?.checkedAtMs || Date.now()), props.lang)}` : ""
+        const reset = row.resetsAtMs ? `, ${span(row.resetsAtMs - Date.now(), props.lang)}` : ""
         return `${windowLabel(row, props.lang)} ${pct}%${props.showRemaining ? " left" : ""}${reset}`
       })
       .join("; ")

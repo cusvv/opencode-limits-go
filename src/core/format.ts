@@ -62,16 +62,35 @@ function parsePercent(raw: unknown): number {
   return Number.NaN
 }
 
+const MIN_RESET_MS = Date.parse("2000-01-01T00:00:00Z")
+const MAX_RESET_AHEAD_MS = 10 * 366 * 86_400_000
+
+function validResetMs(ms: number, now: number): number {
+  if (!Number.isFinite(ms) || ms <= 0) return 0
+  if (ms < MIN_RESET_MS || ms > now + MAX_RESET_AHEAD_MS) return 0
+  return ms
+}
+
+function parseEpochMs(raw: string): number {
+  if (/^\d+$/.test(raw)) {
+    const n = Number(raw)
+    return n < 1e12 ? n * 1000 : n
+  }
+  return Date.parse(raw)
+}
+
 function parseResetMs(item: { resetsAt?: unknown; resetInSec?: unknown }, now: number): number {
   if (typeof item.resetsAt === "string" && item.resetsAt.trim()) {
-    const t = Date.parse(item.resetsAt)
-    return Number.isFinite(t) ? t : 0
+    return validResetMs(parseEpochMs(item.resetsAt.trim()), now)
   }
   if (typeof item.resetsAt === "number" && Number.isFinite(item.resetsAt) && item.resetsAt > 0) {
-    return item.resetsAt < 1e12 ? item.resetsAt * 1000 : item.resetsAt
+    return validResetMs(item.resetsAt < 1e12 ? item.resetsAt * 1000 : item.resetsAt, now)
   }
   if (typeof item.resetInSec === "number" && Number.isFinite(item.resetInSec)) {
     return now + item.resetInSec * 1000
+  }
+  if (typeof item.resetInSec === "string" && /^\d+$/.test(item.resetInSec.trim())) {
+    return now + Number(item.resetInSec.trim()) * 1000
   }
   return 0
 }

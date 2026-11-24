@@ -568,7 +568,7 @@ test("selectStripRows tightest mode, shouldHideStrip, 12h shortDate, nextResetDe
     { key: "weekly" as const, label: "1w", used: 62, status: "ok", resetsAt: "", resetsAtMs: now + 3 * 86_400_000, resetsIn: "3d" },
     { key: "monthly" as const, label: "1m", used: 62, status: "ok", resetsAt: "", resetsAtMs: now + 10 * 86_400_000, resetsIn: "10d" },
   ]
-  const tightest = selectStripRows(rows, { rolling: true, weekly: true, monthly: true }, "tightest")
+  const tightest = selectStripRows(rows, { rolling: true, weekly: true, monthly: true }, "tightest", now)
   assert.equal(tightest.length, 1)
   assert.equal(tightest[0].key, "weekly")
 
@@ -596,4 +596,166 @@ test("selectStripRows tightest mode, shouldHideStrip, 12h shortDate, nextResetDe
   assert.equal(spark.max, 35)
   assert.equal(spark.count, 3)
   assert.ok(spark.polyline.includes(","))
+})
+
+test("limited status counts as exhausted for pace, verdict and alerts", async () => {
+  const { estimateWindowPace, newAlerts, windowVerdict } = await import("./index.ts")
+  const now = 1_700_000_000_000
+  const row = {
+    key: "weekly" as const,
+    label: "1w",
+    used: 42,
+    status: "limited",
+    resetsAt: "Sun",
+    resetsAtMs: now + 2 * 86_400_000,
+    resetsIn: "2d",
+  }
+  const pace = estimateWindowPace(row, now, "en")
+  assert.equal(pace?.kind, "exhausted")
+  assert.ok((pace?.projectedPct ?? 0) >= 100)
+  assert.equal(windowVerdict(row, now, "en")?.kind, "exhausted")
+
+  const notified = new Map<string, number>()
+  assert.equal(newAlerts([row], notified).length, 1)
+  assert.equal(newAlerts([row], notified).length, 0)
+})
+
+test("heavy usage just after reset is still flagged hot", async () => {
+  const { estimateWindowPace } = await import("./index.ts")
+  const now = 1_700_000_000_000
+  const weekMs = 7 * 86_400_000
+  const row = {
+    key: "weekly" as const,
+    label: "1w",
+    used: 40,
+    status: "ok",
+    resetsAt: "Sun",
+    resetsAtMs: now + Math.round(weekMs * 0.995),
+    resetsIn: "6d 23h",
+  }
+  assert.equal(estimateWindowPace(row, now, "en")?.kind, "hot")
+})
+
+test("history snapshots from a previous window are ignored", async () => {
+  const { attachHistoryDeltas, estimateWindowPace, recordUsageSnapshot } = await import("./index.ts")
+  const now = 1_700_000_000_000
+  const newReset = now + 2.5 * 3_600_000
+  const oldReset = newReset - 5 * 3_600_000
+  const row = {
+    key: "rolling" as const,
+    label: "5h",
+    used: 40,
+    status: "ok",
+    resetsAt: "20:00",
+    resetsAtMs: newReset,
+    resetsIn: "2h 30m",
+  }
+
+  assert.deepEqual(recordUsageSnapshot([], [row], now)[0].resets, { rolling: newReset })
+
+  const stale = [{ at: now - 3_600_000, rolling: 2, resets: { rolling: oldReset } }]
+  assert.equal(attachHistoryDeltas([row], stale, now)[0].delta1h, undefined)
+  assert.notEqual(estimateWindowPace(row, now, "en", stale)?.kind, "hot")
+
+  const current = [{ at: now - 3_600_000, rolling: 2, resets: { rolling: newReset } }]
+  assert.equal(attachHistoryDeltas([row], current, now)[0].delta1h, 38)
+  assert.equal(estimateWindowPace(row, now, "en", current)?.kind, "hot")
+})
+
+test("isAuthError ignores numeric substrings inside longer numbers", async () => {
+  const { isAuthError } = await import("./index.ts")
+  assert.equal(isAuthError("account 1401 not found"), false)
+  assert.equal(isAuthError("HTTP 401: Unauthorized"), true)
+  assert.equal(isAuthError("HTTP 403 Forbidden"), true)
+})
+
+test("parseUsage accepts numeric reset strings and rejects implausible dates", async () => {
+  const now = Date.parse("2026-11-17T10:00:00Z")
+  const rows = parseUsage(
+    {
+      usage: {
+        rolling: { percent: 5, resetInSec: "3600" },
+        weekly: { percent: 6, resetsAt: "0" },
+        monthly: { percent: 7, resetsAt: "1700000000" },
+      },
+    },
+    now,
+    "en",
+  )
+  assert.equal(rows[0].resetsAtMs, now + 3_600_000)
+  assert.equal(rows[1].resetsAtMs, 0)
+  assert.equal(rows[2].resetsAtMs, 1_700_000_000_000)
+
+  const farFuture = parseUsage({ usage: { rolling: { percent: 5, resetsAt: "2999-01-01T00:00:00Z" } } }, now, "en")
+  assert.equal(farFuture[0].resetsAtMs, 0)
+})
+
+test("formatTokensCompact promotes just-below-million counts", async () => {
+  const { formatTokensCompact } = await import("./index.ts")
+  assert.equal(formatTokensCompact(999_999), "1.0M")
+})
+
+test("buildSparklinePoints computes min and max above 100", async () => {
+  const { buildSparklinePoints } = await import("./index.ts")
+  const now = 1_700_000_000_000
+  const spark = buildSparklinePoints(
+    [
+      { at: now - 2 * 60_000, rolling: 105 },
+      { at: now - 60_000, rolling: 110 },
+      { at: now, rolling: 108 },
+    ],
+    "rolling",
+    200,
+    24,
+  )
+  assert.ok(spark !== null)
+  assert.equal(spark.min, 105)
+  assert.equal(spark.max, 110)
+})
+
+test("selectSnapshotsForClient never exceeds a small limit", async () => {
+  const { selectSnapshotsForClient } = await import("./index.ts")
+  const now = 1_700_000_000_000
+  const history = [
+    { at: now - 4 * 3_600_000, rolling: 5 },
+    { at: now - 60 * 60_000, rolling: 15 },
+    { at: now - 30 * 60_000, rolling: 25 },
+    { at: now - 10 * 60_000, rolling: 32 },
+  ]
+  const picked = selectSnapshotsForClient(history, now, 2)
+  assert.equal(picked.length, 2)
+  assert.equal(picked[picked.length - 1].at, now - 10 * 60_000)
+})
+
+test("recordUsageSnapshot records a new snapshot when the reset changes", async () => {
+  const { recordUsageSnapshot } = await import("./index.ts")
+  const now = 1_700_000_000_000
+  const row = {
+    key: "rolling" as const,
+    label: "5h",
+    used: 10,
+    status: "ok",
+    resetsAt: "19:00",
+    resetsAtMs: now + 3_600_000,
+    resetsIn: "1h",
+  }
+  const first = recordUsageSnapshot([], [row], now - 60_000)
+  assert.equal(first.length, 1)
+  const next = recordUsageSnapshot(first, [{ ...row, resetsAtMs: now + 5 * 3_600_000 }], now)
+  assert.equal(next.length, 2)
+})
+
+test("alertMessage does not claim a limited window is only at its reported percent", async () => {
+  const { alertMessage } = await import("./index.ts")
+  const row = {
+    key: "rolling" as const,
+    label: "5h",
+    used: 42,
+    status: "limited",
+    resetsAt: "18:00",
+    resetsAtMs: NOW + 3_600_000,
+    resetsIn: "1h",
+  }
+  assert.equal(alertMessage(row, NOW, "en"), "5h limit reached (42% reported), resets: 1h 00m")
+  assert.equal(alertMessage(row, NOW, "ru"), "Лимит 5ч исчерпан (в API 42%), сброс: 1ч 00м")
 })

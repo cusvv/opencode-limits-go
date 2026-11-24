@@ -138,6 +138,12 @@ export default Plugin.define({
     let hiddenPollSkip = 0
     let currentAccount = ""
     let statusInflight = false
+    let requestSeq = 0
+    let statusAbort: AbortController | null = null
+    let queuedForce: boolean | null = null
+    let zenSeq = 0
+    let zenInflight = false
+    let zenQueued = false
 
     const lang = (): Locale => {
       const ov = custom.value.langOverride
@@ -174,12 +180,18 @@ export default Plugin.define({
     const activeWindowCount = () =>
       Number(strip.value.show5h) + Number(strip.value.show1w) + Number(strip.value.show1m)
 
-    function pushSharedPrefs(patch: Record<string, unknown>) {
-      void ctx.client.rpc(Limits).setPrefs(patch, { signal: ctx.signal }).catch(() => {
-        if (ctx.signal.aborted) return
-        ctx.toast.show({ variant: "error", title: t("settings.sharedFailed") })
-        void pullSharedPrefs()
-      })
+    function pushSharedPrefs(patch: Record<string, unknown>): Promise<void> {
+      return ctx.client
+        .rpc(Limits)
+        .setPrefs(patch, { signal: ctx.signal })
+        .then(
+          () => {},
+          () => {
+            if (ctx.signal.aborted) return
+            ctx.toast.show({ variant: "error", title: t("settings.sharedFailed") })
+            void pullSharedPrefs()
+          },
+        )
     }
 
     async function pullSharedPrefs() {
@@ -328,6 +340,7 @@ export default Plugin.define({
         danger: true,
       })
       if (!confirmed || ctx.signal.aborted) return
+      const previousAutoUpdate = prefs.value.autoUpdate
       prefs.set({ placement: "bottom", showBars: true, alerts: true, systemNotifications: false, autoUpdate: true })
       strip.set({ show5h: true, show1w: true, show1m: true, showPercent: true, showLabels: true })
       extras.set({ monoBars: false, showZenStats: true, warnThreshold: 80, pollSeconds: 90 })
@@ -348,17 +361,20 @@ export default Plugin.define({
         dialogSource: true,
         burnSpikePct: 20,
       })
-      void syncAutoUpdate(true)
-      pushSharedPrefs({
-        rolling: true,
-        weekly: true,
-        monthly: true,
-        showRemaining: false,
-        warnThreshold: 80,
-        burnSpikePct: 20,
-        langOverride: "auto",
-      })
-      pushSharedPrefs({ alerts: true, systemNotifications: false })
+      await Promise.all([
+        syncAutoUpdate(true, previousAutoUpdate),
+        pushSharedPrefs({
+          rolling: true,
+          weekly: true,
+          monthly: true,
+          showRemaining: false,
+          warnThreshold: 80,
+          burnSpikePct: 20,
+          langOverride: "auto",
+        }),
+        pushSharedPrefs({ alerts: true, systemNotifications: false }),
+      ])
+      if (ctx.signal.aborted) return
       ctx.toast.show({ variant: "success", title: t("settings.resetDone") })
     }
 
@@ -438,6 +454,12 @@ export default Plugin.define({
 
     async function loadZenActivity() {
       if (!extras.value.showZenStats || ctx.signal.aborted) return
+      if (zenInflight) {
+        zenQueued = true
+        return
+      }
+      zenInflight = true
+      const seq = zenSeq
       try {
         const exp = (ctx.client as unknown as {
           experimental?: {
@@ -470,7 +492,7 @@ export default Plugin.define({
           exp?.session?.stats?.({ from: start.getTime() }, { signal: ctx.signal }).catch(() => null),
           exp?.session?.stats?.({ from: weekStart }, { signal: ctx.signal }).catch(() => null),
         ])
-        if (ctx.signal.aborted) return
+        if (ctx.signal.aborted || seq !== zenSeq) return
         const budgets: ConsoleBudget[] = Array.isArray(limitsRes?.data?.budgets)
           ? limitsRes.data.budgets
               .filter(
@@ -492,7 +514,14 @@ export default Plugin.define({
             ? limitsRes.data.workspace.usageURL
             : undefined
         setZenActivity({ usageUrl, budgets, today, week })
-      } catch {}
+      } catch {
+      } finally {
+        zenInflight = false
+        if (zenQueued && !ctx.signal.aborted) {
+          zenQueued = false
+          void loadZenActivity()
+        }
+      }
     }
 
     function notify(title: string, variant: "default" | "success" | "error"): void {
@@ -508,17 +537,23 @@ export default Plugin.define({
 
     async function refresh(force = false): Promise<LimitCard | null> {
       if (ctx.signal.aborted) return null
-      if (statusInflight) return card()
+      if (statusInflight) {
+        queuedForce = queuedForce === true || force
+        return card()
+      }
       statusInflight = true
+      const seq = requestSeq
+      const ctrl = new AbortController()
+      statusAbort = ctrl
       if (force) setRefreshing(true)
       try {
         const currentLang = lang()
         const maxAgeMs = extras.value.pollSeconds * 1000
-        const signal = AbortSignal.any([ctx.signal, AbortSignal.timeout(30_000)])
+        const signal = AbortSignal.any([ctx.signal, ctrl.signal, AbortSignal.timeout(30_000)])
         const result = (await ctx.client
           .rpc(Limits)
           .status({ force, lang: currentLang, maxAgeMs }, { signal })) as LimitCard
-        if (ctx.signal.aborted) return null
+        if (ctx.signal.aborted || seq !== requestSeq) return null
         setReady(true)
         if (result.ok) {
           setCard(result)
@@ -535,9 +570,9 @@ export default Plugin.define({
             lastSystemNotifyAt = 0
           }
           currentAccount = acct
-          const triggered = newAlerts(result.rows, notified, extras.value.warnThreshold)
-          const recovered = recoveredAlerts(result.rows, wasExhausted)
           if (prefs.value.alerts && !result.stale) {
+            const triggered = newAlerts(result.rows, notified, extras.value.warnThreshold)
+            const recovered = recoveredAlerts(result.rows, wasExhausted)
             for (const row of triggered) {
               notify(alertMessage(row, now, currentLang), row.used >= 100 ? "error" : "default")
             }
@@ -569,7 +604,7 @@ export default Plugin.define({
         }
         return result
       } catch {
-        if (ctx.signal.aborted) return null
+        if (ctx.signal.aborted || seq !== requestSeq) return null
         setReady(true)
         if (card()?.ok) {
           setStaleError(t("limits.noServer"))
@@ -578,15 +613,27 @@ export default Plugin.define({
         }
         return null
       } finally {
+        if (statusAbort === ctrl) statusAbort = null
         statusInflight = false
         if (force && !ctx.signal.aborted) setRefreshing(false)
+        if (!ctx.signal.aborted) {
+          const next = queuedForce
+          queuedForce = null
+          if (next !== null) void refresh(next)
+        }
       }
     }
 
-    async function syncAutoUpdate(enabled: boolean) {
+    async function syncAutoUpdate(enabled: boolean, previous: boolean): Promise<void> {
       try {
         await ctx.client.rpc(Limits).setUpdateConfig({ autoUpdate: enabled }, { signal: ctx.signal })
-      } catch {}
+      } catch {
+        if (ctx.signal.aborted) return
+        prefs.update((draft) => {
+          draft.autoUpdate = previous
+        })
+        ctx.toast.show({ variant: "error", title: t("settings.sharedFailed") })
+      }
     }
 
     async function checkUpdates(checkNow = false) {
@@ -625,9 +672,10 @@ export default Plugin.define({
           ctx.toast.show({ variant: "error", title: t("settings.update.failedToast", { error: res.error }) })
           return
         }
-        if (res.restartRequired) notifyUpdated(res.version)
         if (res.error) {
-          ctx.toast.show({ variant: "error", title: t("settings.update.failedToast", { error: res.error }) })
+          ctx.toast.show({ variant: "default", title: t("settings.update.warningToast", { error: res.error }) })
+        } else if (res.restartRequired) {
+          notifyUpdated(res.version)
         }
         await checkUpdates(false)
       } catch (error) {
@@ -645,7 +693,7 @@ export default Plugin.define({
     void retry(() => refresh(), (r) => r !== null, 5, undefined, ctx.signal).then(() => {
       if (ctx.signal.aborted) return
       void pullSharedPrefs()
-      void syncAutoUpdate(prefs.value.autoUpdate)
+      void syncAutoUpdate(prefs.value.autoUpdate, prefs.value.autoUpdate)
       void checkUpdates(false)
     })
 
@@ -691,12 +739,34 @@ export default Plugin.define({
         events?: {
           on?: (
             name: "changed" | "updated" | "prefsChanged",
-            fn: (ev: { data?: { version?: string } }) => void,
+            fn: (ev: { data?: { version?: string; reason?: string } }) => void,
             opts?: { signal?: AbortSignal },
           ) => () => void
         }
       }
-      const stopChanged = rpcClient.events?.on?.("changed", () => void refresh(), { signal: ctx.signal })
+      const stopChanged = rpcClient.events?.on?.(
+        "changed",
+        (ev) => {
+          if (ev?.data?.reason !== "credentials") {
+            void refresh()
+            return
+          }
+          requestSeq += 1
+          statusAbort?.abort()
+          setCard(null)
+          setStaleError("")
+          setZenActivity(null)
+          zenSeq += 1
+          currentAccount = ""
+          notified.clear()
+          wasExhausted.clear()
+          riskNotified.clear()
+          lastSpikeAlertAt = 0
+          lastSystemNotifyAt = 0
+          void refresh(true)
+        },
+        { signal: ctx.signal },
+      )
       if (stopChanged) onCleanup(stopChanged)
       const stopPrefsChanged = rpcClient.events?.on?.("prefsChanged", () => void pullSharedPrefs(), {
         signal: ctx.signal,
@@ -1219,6 +1289,7 @@ export default Plugin.define({
 
     function NotificationFields(props: { page?: boolean; compact?: boolean }) {
       const thresholdOptions = () => [
+        { value: "50" as const, label: t("settings.threshold.50") },
         { value: "70" as const, label: t("settings.threshold.70") },
         { value: "80" as const, label: t("settings.threshold.80") },
         { value: "90" as const, label: t("settings.threshold.90") },
@@ -1425,10 +1496,11 @@ export default Plugin.define({
                 hideLabel
                 checked={prefs.value.autoUpdate}
                 onChange={(checked) => {
+                  const previous = prefs.value.autoUpdate
                   prefs.update((draft) => {
                     draft.autoUpdate = checked
                   })
-                  void syncAutoUpdate(checked)
+                  void syncAutoUpdate(checked, previous)
                 }}
               />
             </SettingField>
@@ -1512,11 +1584,19 @@ export default Plugin.define({
     function openErrorDialog(errorMsg: string) {
       ctx.dialogs.open((dialog) => {
         const [err, setErr] = createSignal(errorMsg)
+        let closed = false
+        const closeDialog = () => {
+          closed = true
+          dialog.close()
+        }
+        onCleanup(() => {
+          closed = true
+        })
         const handleRetry = async () => {
           const next = await refresh(true)
-          if (ctx.signal.aborted) return
+          if (ctx.signal.aborted || closed) return
           if (next?.ok) {
-            dialog.close()
+            closeDialog()
             openCard(next)
           } else {
             setErr(next?.error || t("limits.failed"))
@@ -1539,7 +1619,7 @@ export default Plugin.define({
                       label={t("limits.settings")}
                       variant="neutral"
                       onClick={() => {
-                        dialog.close()
+                        closeDialog()
                         openSettingsDialog()
                       }}
                     />
@@ -1565,7 +1645,7 @@ export default Plugin.define({
                   <ui.Button variant="contrast" icon="refresh" busy={refreshing()} onClick={() => void handleRetry()}>
                     {t("limits.retry")}
                   </ui.Button>
-                  <ui.Button variant="neutral" onClick={dialog.close}>
+                  <ui.Button variant="neutral" onClick={closeDialog}>
                     {t("limits.close")}
                   </ui.Button>
                 </div>

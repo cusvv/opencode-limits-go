@@ -174,3 +174,81 @@ test("parseCliExport and parseLegacyAuth ignore invalid entries", () => {
     ["sk-1", "st_2"],
   )
 })
+
+test("createCredentials caches an empty CLI export instead of probing on every call", async () => {
+  let cliCalls = 0
+  const creds = createCredentials({
+    env: {},
+    runCli: async () => {
+      cliCalls++
+      return []
+    },
+    readLegacyAuth: async () => null,
+  })
+
+  await creds.listFallback()
+  await creds.listFallback()
+  await creds.listFallback()
+  assert.equal(cliCalls, 1)
+})
+
+test("createCredentials shares one in-flight CLI probe between concurrent fallback calls", async () => {
+  let cliCalls = 0
+  let release: () => void = () => {}
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const creds = createCredentials({
+    env: {},
+    runCli: async () => {
+      cliCalls++
+      await gate
+      return [{ integrationID: "opencode-go", active: true, value: { type: "key", key: "sk-parallel" } }]
+    },
+    readLegacyAuth: async () => null,
+  })
+
+  const first = creds.listFallback()
+  const second = creds.listFallback()
+  release()
+  const [a, b] = await Promise.all([first, second])
+  assert.equal(cliCalls, 1)
+  assert.deepEqual(a.map((c) => c.access), ["sk-parallel"])
+  assert.deepEqual(b.map((c) => c.access), ["sk-parallel"])
+})
+
+test("createCredentials does not retry a failed CLI probe within the cache TTL", async () => {
+  let cliCalls = 0
+  const creds = createCredentials({
+    env: {},
+    runCli: async () => {
+      cliCalls++
+      throw new Error("opencode auth export failed")
+    },
+    readLegacyAuth: async () => null,
+  })
+
+  await creds.listFallback()
+  await creds.listFallback()
+  await creds.listFallback()
+  assert.equal(cliCalls, 1)
+})
+
+test("createCredentials dropCli forces a fresh probe after a cached empty result", async () => {
+  let cliCalls = 0
+  const creds = createCredentials({
+    env: {},
+    runCli: async () => {
+      cliCalls++
+      return []
+    },
+    readLegacyAuth: async () => null,
+  })
+
+  await creds.listFallback()
+  await creds.listFallback()
+  assert.equal(cliCalls, 1)
+  creds.dropCli()
+  await creds.listFallback()
+  assert.equal(cliCalls, 2)
+})

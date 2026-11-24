@@ -91,9 +91,16 @@ export default Plugin.define({
     const [card, setCard] = createSignal<LimitCard | null>(null)
     const [staleError, setStaleError] = createSignal("")
     const stopCtrl = new AbortController()
+    const renderer = ctx.renderer
+    const [termWidth, setTermWidth] = createSignal(renderer?.terminalWidth ?? 80)
+    const onResize = (width: number) => setTermWidth(width)
+    renderer?.on("resize", onResize)
     let notifiedVersion = ""
     let lastSystemNotifyAt = 0
     let refreshing = false
+    let requestSeq = 0
+    let statusAbort: AbortController | null = null
+    let queuedForce: boolean | null = null
 
     function notify(message: string, variant: "info" | "warning" | "error"): void {
       ctx.ui.toast.show({ message, variant })
@@ -133,7 +140,7 @@ export default Plugin.define({
 
     function pushSharedPrefs(patch: Partial<TuiPrefs>) {
       void ctx.client.rpc(Limits).setPrefs(patch, { signal: stopCtrl.signal }).catch(() => {
-        notify(copy().noServer, "error")
+        ctx.ui.toast.show({ message: copy().noServer, variant: "error" })
         void pullSharedPrefs()
       })
     }
@@ -191,13 +198,19 @@ export default Plugin.define({
 
     async function refresh(force = false): Promise<LimitCard | null> {
       if (stopCtrl.signal.aborted) return null
-      if (refreshing) return card()
+      if (refreshing) {
+        queuedForce = queuedForce === true || force
+        return card()
+      }
       refreshing = true
+      const seq = requestSeq
+      const ctrl = new AbortController()
+      statusAbort = ctrl
       try {
         const currentLang = lang()
-        const signal = AbortSignal.any([stopCtrl.signal, AbortSignal.timeout(30_000)])
+        const signal = AbortSignal.any([stopCtrl.signal, ctrl.signal, AbortSignal.timeout(30_000)])
         const result = (await ctx.client.rpc(Limits).status({ force, lang: currentLang }, { signal })) as LimitCard
-        if (stopCtrl.signal.aborted) return null
+        if (stopCtrl.signal.aborted || seq !== requestSeq) return null
         if (result.ok) {
           setCard(result)
           setStaleError("")
@@ -210,7 +223,7 @@ export default Plugin.define({
         }
         return result
       } catch (error) {
-        if (stopCtrl.signal.aborted) return null
+        if (stopCtrl.signal.aborted || seq !== requestSeq) return null
         log("tui status failed", { error: errorText(error, "en") })
         if (card()?.ok) {
           setStaleError(copy().noServer)
@@ -219,7 +232,13 @@ export default Plugin.define({
         }
         return null
       } finally {
+        if (statusAbort === ctrl) statusAbort = null
         refreshing = false
+        if (!stopCtrl.signal.aborted) {
+          const next = queuedForce
+          queuedForce = null
+          if (next !== null) void refresh(next)
+        }
       }
     }
 
@@ -323,22 +342,27 @@ export default Plugin.define({
           restartRequired?: boolean
           managedByPackageManager?: boolean
           managedByDev?: boolean
+          error?: string
         }
         if (stopCtrl.signal.aborted) return
+        if (res.error) {
+          ctx.ui.toast.show({ message: c.updateCheckFailed(res.error), variant: "error" })
+          return
+        }
         if (res.restartRequired) {
-          notify(c.updated(res.latestVersion), "info")
+          ctx.ui.toast.show({ message: c.updated(res.latestVersion), variant: "info" })
           return
         }
         if (!res.updateAvailable) {
-          notify(c.upToDate(res.currentVersion), "info")
+          ctx.ui.toast.show({ message: c.upToDate(res.currentVersion), variant: "info" })
           return
         }
         if (res.managedByPackageManager) {
-          notify(c.updateManaged(res.latestVersion), "info")
+          ctx.ui.toast.show({ message: c.updateManaged(res.latestVersion), variant: "info" })
           return
         }
         if (res.managedByDev) {
-          notify(c.updateDev, "info")
+          ctx.ui.toast.show({ message: c.updateDev, variant: "info" })
           return
         }
         const installed = (await ctx.client.rpc(Limits).installUpdate({}, { signal: stopCtrl.signal })) as {
@@ -347,11 +371,13 @@ export default Plugin.define({
           error: string
         }
         if (stopCtrl.signal.aborted) return
-        notify(
-          installed.ok ? c.updated(installed.version || res.latestVersion) : c.updateInstallFailed(installed.error),
-          installed.ok ? "info" : "error",
-        )
-        if (installed.ok && installed.error) notify(c.updateInstallFailed(installed.error), "warning")
+        if (!installed.ok) {
+          ctx.ui.toast.show({ message: c.updateInstallFailed(installed.error), variant: "error" })
+        } else if (installed.error) {
+          ctx.ui.toast.show({ message: c.updateNeedsInstall(installed.error), variant: "warning" })
+        } else {
+          ctx.ui.toast.show({ message: c.updated(installed.version || res.latestVersion), variant: "info" })
+        }
       } catch {}
     }
 
@@ -373,7 +399,7 @@ export default Plugin.define({
     const text = () => {
       const current = card()
       if (!current) return copy().loading
-      const compact = (ctx.renderer?.terminalWidth ?? 80) < 76
+      const compact = termWidth() < 76
       const base = formatTuiSidebar(
         current,
         tuiPrefs,
@@ -424,12 +450,34 @@ export default Plugin.define({
         events?: {
           on?: (
             name: "changed" | "updated" | "prefsChanged",
-            fn: (ev: { data?: { version?: string } }) => void,
+            fn: (ev: { data?: { version?: string; reason?: string } }) => void,
             opts?: { signal?: AbortSignal },
           ) => () => void
         }
       }
-      stopChanged = rpcClient.events?.on?.("changed", () => void refresh(), { signal: stopCtrl.signal })
+      stopChanged = rpcClient.events?.on?.(
+        "changed",
+        (ev) => {
+          if (ev?.data?.reason !== "credentials") {
+            void refresh()
+            return
+          }
+          requestSeq += 1
+          statusAbort?.abort()
+          setCard(null)
+          setStaleError("")
+          lastSystemNotifyAt = 0
+          void setAlertState((draft) => {
+            draft.account = ""
+            draft.notified = {}
+            draft.exhausted = []
+            draft.risk = {}
+            draft.spikeAt = 0
+          })
+          void refresh(true)
+        },
+        { signal: stopCtrl.signal },
+      )
       stopPrefsChanged = rpcClient.events?.on?.("prefsChanged", () => void pullSharedPrefs(), { signal: stopCtrl.signal })
       stopUpdated = rpcClient.events?.on?.(
         "updated",
@@ -437,7 +485,7 @@ export default Plugin.define({
           const v = ev?.data?.version
           if (!v || v === notifiedVersion || stopCtrl.signal.aborted) return
           notifiedVersion = v
-          notify(copy().updated(v), "info")
+          ctx.ui.toast.show({ message: copy().updated(v), variant: "info" })
         },
         { signal: stopCtrl.signal },
       )
@@ -469,7 +517,8 @@ export default Plugin.define({
                     l,
                     [result?.error ?? c.failed],
                     showRemaining(),
-                    (ctx.renderer?.terminalWidth ?? 80) < 76,
+                    termWidth() < 76,
+                    tuiPrefs.plain === true,
                   ),
                 })
                 return
@@ -490,7 +539,8 @@ export default Plugin.define({
                 l,
                 extra,
                 showRemaining(),
-                (ctx.renderer?.terminalWidth ?? 80) < 76,
+                termWidth() < 76,
+                tuiPrefs.plain === true,
               ),
             })
           },
@@ -594,6 +644,7 @@ export default Plugin.define({
 
     return () => {
       stopCtrl.abort()
+      renderer?.off("resize", onResize)
       if (timer) clearTimeout(timer)
       stopChanged?.()
       stopPrefsChanged?.()

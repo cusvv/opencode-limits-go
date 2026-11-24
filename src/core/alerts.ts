@@ -4,10 +4,14 @@ import { resetText, span } from "./format.ts"
 export function alertMessage(row: LimitRow, now = Date.now(), lang: Locale = "en"): string {
   const label = windowLabel(row, lang)
   const { passed, text } = resetText(row.resetsAtMs, row.resetsIn, now, lang)
-  if (lang === "ru") {
-    return `Лимит ${label}: ${row.used}%${passed ? ` (${text})` : `, сброс: ${text}`}`
+  const suffix = passed ? ` (${text})` : lang === "ru" ? `, сброс: ${text}` : `, resets: ${text}`
+  if (row.status === "limited" && row.used < 100) {
+    return lang === "ru"
+      ? `Лимит ${label} исчерпан (в API ${row.used}%)${suffix}`
+      : `${label} limit reached (${row.used}% reported)${suffix}`
   }
-  return `Limit ${label}: ${row.used}%${passed ? ` (${text})` : `, resets: ${text}`}`
+  if (lang === "ru") return `Лимит ${label}: ${row.used}%${suffix}`
+  return `Limit ${label}: ${row.used}%${suffix}`
 }
 
 // Track the highest threshold seen per window so notifications fire once per crossing and reset after drop.
@@ -16,7 +20,9 @@ export function newAlerts(rows: LimitRow[], notified: Map<string, number>, warnT
   const alerts: LimitRow[] = []
   for (const row of rows) {
     const id = row.key ?? row.label
-    const level = thresholds.filter((t) => row.used >= t).pop() ?? 0
+    // A `limited` window is at 100% for alerting even if the reported percent lags behind.
+    const effectiveUsed = row.status === "limited" ? Math.max(100, row.used) : row.used
+    const level = thresholds.filter((t) => effectiveUsed >= t).pop() ?? 0
     if (level > (notified.get(id) ?? 0)) alerts.push(row)
     notified.set(id, level)
   }
@@ -67,6 +73,8 @@ export function detectBurnSpike(
   for (const snap of snapshots) {
     const val = snap.rolling
     if (typeof val !== "number") continue
+    const snapReset = snap.resets?.rolling
+    if (row.resetsAtMs && typeof snapReset === "number" && snapReset !== row.resetsAtMs) continue
     const ageMs = now - snap.at
     if (ageMs < minAgeMs || ageMs > maxAgeMs) continue
     const delta = row.used - val

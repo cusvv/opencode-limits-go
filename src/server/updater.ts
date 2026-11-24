@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process"
-import { createHash } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import { existsSync } from "node:fs"
 import { cp, mkdir, mkdtemp, open, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import os from "node:os"
@@ -48,6 +48,85 @@ export type UpdateStatus = {
   error: string
 }
 
+export type ArchiveListing = { bytes: number; entries: number }
+
+// GNU tar: "-rw-r--r-- user/group 123 2024-01-01 12:00 dir/file"
+// bsdtar:  "-rw-r--r--  0 0  0  123 Jan  1 12:00 dir/file" (or "Jan  1  2023" for old entries)
+const TAR_LINE = new RegExp(
+  String.raw`^(\S+)\s+.*?\s(\d+)\s+(?:\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}(?::\d{2})?|\S+\s+\d{1,2}\s+(?:\d{1,2}:\d{2}(?::\d{2})?|\d{4}))\s+(.+)$`,
+)
+// unzip uses the host locale for dates: accept YYYY-MM-DD and MM-DD-YYYY/DD-MM-YYYY (with - . /).
+const ZIP_LINE = /^\s*(\d+)\s+(?:\d{4}[-/.]\d{2}[-/.]\d{2}|\d{2}[-/.]\d{2}[-/.]\d{4})\s+\d{2}:\d{2}\s+(.+)$/
+
+function assertSafeArchivePath(name: string): void {
+  const normalized = name.replace(/\\/g, "/")
+  if (normalized.startsWith("/") || /^[A-Za-z]:/.test(normalized) || normalized.split("/").includes("..")) {
+    throw new Error(`Archive entry escapes the install root: ${name}`)
+  }
+}
+
+/**
+ * Parse `tar -tvzf` output (GNU tar or bsdtar). Rejects links, unsafe paths, and oversized archives.
+ * Throws on any unparseable line: the caller must fail closed.
+ */
+export function parseTarListing(listing: string, maxBytes: number = MAX_EXTRACTED_BYTES): ArchiveListing {
+  let bytes = 0
+  let entries = 0
+  for (const raw of listing.split(/\r?\n/)) {
+    if (!raw.trim()) continue
+    const match = raw.match(TAR_LINE)
+    if (!match) throw new Error(`Unparseable tar listing line: ${raw.trim()}`)
+    const [, mode, sizeText, name] = match
+    const type = mode.charAt(0)
+    if (type === "l") throw new Error("Archive contains a symbolic link")
+    if (type === "h") throw new Error("Archive contains a hard link")
+    assertSafeArchivePath(name)
+    entries++
+    if (type === "-") {
+      bytes += Number(sizeText)
+      if (bytes > maxBytes) throw new Error("Extracted archive is too large")
+    }
+  }
+  if (!entries) throw new Error("Archive listing is empty")
+  return { bytes, entries }
+}
+
+/**
+ * Parse `unzip -l` output (`sizes: true`) or `tar -tf` names-only output (`sizes: false`).
+ * Rejects unsafe paths and oversized archives; throws when the listing cannot be parsed.
+ */
+export function parseZipListing(
+  listing: string,
+  options: { sizes?: boolean; maxBytes?: number } = {},
+): ArchiveListing {
+  const sizes = options.sizes ?? true
+  const maxBytes = options.maxBytes ?? MAX_EXTRACTED_BYTES
+  let bytes = 0
+  let entries = 0
+  for (const raw of listing.split(/\r?\n/)) {
+    if (!raw.trim()) continue
+    let name: string
+    if (sizes) {
+      const match = raw.match(ZIP_LINE)
+      // Archive:/Length header/footer lines are not entries.
+      if (!match) {
+        if (/^Archive:|^\s*Length\s|^\s*-+\s|^\s*\d+\s+\d+\s+files?$/.test(raw)) continue
+        throw new Error(`Unparseable zip listing line: ${raw.trim()}`)
+      }
+      name = match[2].trim()
+      bytes += Number(match[1])
+      if (bytes > maxBytes) throw new Error("Extracted archive is too large")
+    } else {
+      name = raw.trim()
+    }
+    if (name.includes(" -> ")) throw new Error("Archive contains a symbolic link")
+    assertSafeArchivePath(name)
+    entries++
+  }
+  if (!entries) throw new Error("Archive listing is empty")
+  return { bytes, entries }
+}
+
 export function isDevInstall(pluginRoot: string): boolean {
   const resolved = path.resolve(pluginRoot)
   return existsSync(path.join(resolved, ".git")) || /[\\/]local-plugins[\\/]/i.test(resolved)
@@ -71,6 +150,7 @@ export type UpdaterDeps = {
   pluginRoot?: string
   fetchFn?: typeof fetch
   extractFn?: (archivePath: string, outDir: string, kind: "tar.gz" | "zip") => Promise<void>
+  inspectFn?: (archivePath: string, kind: "tar.gz" | "zip") => Promise<void>
   nowFn?: () => number
   onInstalled?: (version: string) => void
 }
@@ -163,12 +243,33 @@ function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex")
 }
 
+export async function readLockOwner(lockPath: string): Promise<string | null> {
+  try {
+    return (await readFile(lockPath, "utf8")).trim()
+  } catch {
+    return null
+  }
+}
+
+/** Remove the lock only when it still belongs to `token`; returns whether it was removed. */
+export async function releaseIfOwned(lockPath: string, token: string): Promise<boolean> {
+  const owner = await readLockOwner(lockPath)
+  if (!owner || owner !== token) return false
+  try {
+    await rm(lockPath, { force: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function acquireUpdateLock(root: string): Promise<() => Promise<void>> {
   const lockPath = path.join(root, UPDATE_LOCK)
+  const token = `${process.pid} ${Date.now()} ${randomBytes(8).toString("hex")}`
   const attempt = async (): Promise<void> => {
     const handle = await open(lockPath, "wx", 0o600)
     try {
-      await handle.write(`${process.pid} ${Date.now()}`)
+      await handle.write(token)
     } finally {
       await handle.close()
     }
@@ -188,7 +289,7 @@ async function acquireUpdateLock(root: string): Promise<() => Promise<void>> {
     }
   }
   return async () => {
-    await rm(lockPath, { force: true }).catch(() => {})
+    await releaseIfOwned(lockPath, token)
   }
 }
 
@@ -218,14 +319,48 @@ async function assertExtractedSize(dir: string, total = { bytes: 0 }): Promise<n
   return total.bytes
 }
 
+function tarCommand(): string {
+  return process.platform === "win32"
+    ? path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe")
+    : "tar"
+}
+
+async function readArchiveListing(archivePath: string, kind: "tar.gz" | "zip"): Promise<string> {
+  const win = process.platform === "win32"
+  const options = { timeout: 30_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }
+  if (kind === "tar.gz") {
+    const { stdout } = await exec(tarCommand(), ["-tvzf", archivePath], options)
+    return stdout
+  }
+  // Windows bsdtar has no `unzip`: `tar -tf` lists zip names without sizes (checked separately).
+  const { stdout } = win
+    ? await exec(tarCommand(), ["-tf", archivePath], options)
+    : await exec("unzip", ["-l", archivePath], options)
+  return stdout
+}
+
+/**
+ * Inspect the archive listing before extraction. Security checks must pass on the listing:
+ * an unreadable or unparseable listing means the install is refused.
+ */
+async function inspectArchive(archivePath: string, kind: "tar.gz" | "zip"): Promise<void> {
+  let listing: string
+  try {
+    listing = await readArchiveListing(archivePath, kind)
+  } catch (error) {
+    throw new Error(`Archive listing failed: ${errorText(error)}`)
+  }
+  if (kind === "tar.gz") parseTarListing(listing)
+  else parseZipListing(listing, { sizes: process.platform !== "win32" })
+}
+
 async function defaultExtractArchive(
   archivePath: string,
   outDir: string,
   kind: "tar.gz" | "zip",
 ): Promise<void> {
   if (process.platform === "win32") {
-    const tarExe = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe")
-    await exec(tarExe, ["-xf", archivePath, "-C", outDir], { timeout: 30_000, windowsHide: true })
+    await exec(tarCommand(), ["-xf", archivePath, "-C", outDir], { timeout: 30_000, windowsHide: true })
     return
   }
   if (kind === "zip") {
@@ -318,18 +453,29 @@ async function backupPlugin(destRoot: string, backupRoot: string): Promise<void>
   }
 }
 
-async function restorePlugin(backupRoot: string, destRoot: string): Promise<void> {
+export async function restorePlugin(backupRoot: string, destRoot: string): Promise<void> {
   for (const rel of TOP_LEVEL_FILES) {
     const src = path.join(backupRoot, rel)
-    if (await exists(src)) await cp(src, path.join(destRoot, rel), { force: true })
+    const dest = path.join(destRoot, rel)
+    if (await exists(src)) await cp(src, dest, { force: true })
+    else await rm(dest, { force: true })
   }
-  if (await exists(path.join(backupRoot, "src"))) {
-    await cp(path.join(backupRoot, "src"), path.join(destRoot, "src"), { recursive: true, force: true })
+  const srcBackup = path.join(backupRoot, "src")
+  const destSrc = path.join(destRoot, "src")
+  if (await exists(srcBackup)) {
+    // Replace the whole tree: a failed copy may have added files the backup never had.
+    await rm(destSrc, { recursive: true, force: true })
+    await cp(srcBackup, destSrc, { recursive: true, force: true })
+  } else {
+    await rm(destSrc, { recursive: true, force: true })
   }
   const gui = path.join(backupRoot, "dist", "gui-experimental.cjs")
+  const destGui = path.join(destRoot, "dist", "gui-experimental.cjs")
   if (await exists(gui)) {
-    await mkdir(path.join(destRoot, "dist"), { recursive: true })
-    await cp(gui, path.join(destRoot, "dist", "gui-experimental.cjs"), { force: true })
+    await mkdir(path.dirname(destGui), { recursive: true })
+    await cp(gui, destGui, { force: true })
+  } else {
+    await rm(destGui, { force: true })
   }
 }
 
@@ -359,6 +505,7 @@ export function createUpdater(deps: UpdaterDeps = {}) {
   const managedByDev = isDevInstall(pluginRoot)
   const fetchFn = deps.fetchFn ?? fetch
   const extractFn = deps.extractFn ?? defaultExtractArchive
+  const inspectFn = deps.inspectFn ?? inspectArchive
   const nowFn = deps.nowFn ?? Date.now
 
   let lastStatus: UpdateStatus | null = null
@@ -465,6 +612,7 @@ export function createUpdater(deps: UpdaterDeps = {}) {
         if (sha256(bytes) !== expectedHash) throw new Error("Downloaded archive checksum does not match SHA256SUMS")
         await writeFile(archivePath, bytes)
 
+        await inspectFn(archivePath, download.kind)
         await extractFn(archivePath, extractDir, download.kind)
         await assertExtractedSize(extractDir)
         const verifiedRoot = await findVerifiedPluginRoot(extractDir)
@@ -524,7 +672,13 @@ export function createUpdater(deps: UpdaterDeps = {}) {
 
     // Never cache a failed check for six hours: a temporary 403/429 must retry.
     if (!opts.force && lastStatus && !lastStatus.error && now - lastStatus.checkedAtMs < CHECK_TTL_MS) {
-      if (!opts.autoInstall || !lastStatus.updateAvailable || installedVersion) {
+      if (
+        !opts.autoInstall ||
+        !lastStatus.updateAvailable ||
+        installedVersion ||
+        managedByDev ||
+        managedByPackageManager
+      ) {
         return lastStatus
       }
     }

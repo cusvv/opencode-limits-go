@@ -3,12 +3,23 @@ import { CodedError, type Locale, formatError } from "./types.ts"
 export function redactSecrets(text: string): string {
   return text
     .replace(/Bearer\s+[^\s"'`]+/gi, "Bearer [REDACTED]")
+    .replace(/\bBasic\s+[A-Za-z0-9+/]{4,}={0,2}/g, "Basic [REDACTED]")
     .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g, "[REDACTED]")
     .replace(/\b(?:st|rt|sk|oc|pat|gho|ghp|gsk|xai)_[A-Za-z0-9._-]{6,}/gi, "[REDACTED]")
     .replace(/\bsk-[A-Za-z0-9._-]{8,}/gi, "[REDACTED]")
     .replace(/\bAIza[0-9A-Za-z_-]{20,}/g, "[REDACTED]")
     .replace(/\bAKIA[0-9A-Z]{16,}/g, "[REDACTED]")
-    .replace(/\b(token|access_token|api_key|apikey|key)=([^&\s"'`]+)/gi, "$1=[REDACTED]")
+    // JSON: keep the key, redact the string value.
+    .replace(
+      /("(?:token|access_token|refresh_token|api_key|apikey|key|authorization)"\s*:\s*)"[^"\r\n]*"/gi,
+      '$1"[REDACTED]"',
+    )
+    // Header forms (may be embedded in a log line): x-api-key: ..., api-key: ..., Authorization: ...
+    .replace(
+      /(\b(?:x-api-key|api-key|authorization)[ \t]*:[ \t]*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n"]+)/gi,
+      "$1[REDACTED]",
+    )
+    .replace(/\b(token|access_token|refresh_token|api_key|apikey|key)=([^&\s"'`]+)/gi, "$1=[REDACTED]")
 }
 
 export function errorText(error: unknown, lang: Locale = "en"): string {

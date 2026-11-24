@@ -43,6 +43,7 @@ export function cardDetail(
   extraLines: readonly string[] = [],
   showRemaining = false,
   narrow = false,
+  plain = false,
 ): string {
   const source = sourceLabel(card.source, lang)
   const checkedPrefix = lang === "ru" ? "Проверено" : "Checked"
@@ -64,7 +65,10 @@ export function cardDetail(
     const deltaPart = row.delta1h && row.delta1h > 0 ? `  +${row.delta1h}%` : ""
     const statusPart = row.status !== "ok" ? `  [${row.status}]` : ""
     const width = narrow ? 10 : 20
-    return `${label.padStart(4)}: ${String(displayPercent(row.used, showRemaining)).padStart(3)}%  ${bar(displayPercent(row.used, showRemaining), width)}  ${resetPart}${deltaPart}${statusPart}`
+    const renderedBar = plain
+      ? asciiBar(displayPercent(row.used, showRemaining), width)
+      : bar(displayPercent(row.used, showRemaining), width)
+    return `${label.padStart(4)}: ${String(displayPercent(row.used, showRemaining)).padStart(3)}%  ${renderedBar}  ${resetPart}${deltaPart}${statusPart}`
   })
   const tightLineStr = tightLine(card.rows, now, lang)
   const pace = paceSummary(card.rows, now, lang, card.snapshots)

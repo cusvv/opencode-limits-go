@@ -45,7 +45,7 @@ TUI is intentionally one line in the sidebar:
 - **Reset-aligned cold start**: persists the last valid snapshot for 0 ms startup, refreshes 3 seconds after any window resets, respects `Retry-After` on `429`/`503`, and slows background polling 3× when minimized.
 
 ### Alerts that reach you
-- Threshold toasts (`70%` / `80%` / `90%` / `100%`), quota-reset recovery toasts, fast-burn spike alerts, and **"won't survive until reset"** warnings.
+- Threshold toasts (`50%` / `70%` / `80%` / `90%` / `100%`), quota-reset recovery toasts, fast-burn spike alerts, and **"won't survive until reset"** warnings.
 - **System notifications** when the app is not focused — **off by default**, opt-in, and only for 100% quota (max once per 10 minutes). In-app toasts remain separate.
 - Alerts are deduplicated per account/window/reset, persisted in TUI storage across `/reload`, and never fire on stale disk-cache data.
 
@@ -57,7 +57,7 @@ TUI is intentionally one line in the sidebar:
 ### Credentials and updates
 - Works with OpenCode Console **OAuth** (`opencode`), saved **API keys** (`opencode-go` / `opencode`), env vars (`OPENCODE_GO_API_KEY`, `OPENCODE_API_KEY`, `OPENCODE_ZEN_API_KEY`), plugin options, `opencode auth export`, and legacy `auth.json`.
 - Tokens never leave the server process — never sent over RPC, never shown in the UI, and redacted from logs.
-- **Dev installs (`git clone` or `local-plugins`) are never overwritten** by the updater. Release installs update only from a release that ships `SHA256SUMS`, with a version check, process lock, and `package.json` written last.
+- **Dev installs (`git clone` or `local-plugins`) are never overwritten** by the updater. Release installs update only from a release that ships `SHA256SUMS`, with a version check, archive-listing validation, process lock, and `package.json` written last.
 
 ---
 
@@ -208,8 +208,8 @@ A healthy response has `"ok": true` and a non-empty `rows` array. `"ok": false` 
 
 - No telemetry. Network access is limited to the OpenCode Go usage endpoint and GitHub releases.
 - Tokens are read server-side and never cross RPC. Credential lookup is time-bounded, and Windows CLI fallback blocks current-directory executable hijacking.
-- Logs are created in a private directory with `0600` permissions and redact bearer tokens, JWTs, and common API-key formats.
-- Updates require HTTPS GitHub hosts, `SHA256SUMS`, a matching `package.json` version, and a stale-aware process lock. Dev/git installs are excluded.
+- Logs are created in a private directory (`0700`) with `0600` files and redact bearer/basic tokens, JWTs, JSON secret values, auth headers, and common API-key formats.
+- Updates require HTTPS GitHub hosts, `SHA256SUMS`, a matching `package.json` version, a fail-closed archive listing check, and a stale-aware process lock with an owner token. Dev/git installs are excluded.
 
 ---
 

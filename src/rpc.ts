@@ -23,6 +23,14 @@ const snapshotSchema = {
     rolling: { type: "number" },
     weekly: { type: "number" },
     monthly: { type: "number" },
+    resets: {
+      type: "object",
+      properties: {
+        rolling: { type: "number" },
+        weekly: { type: "number" },
+        monthly: { type: "number" },
+      },
+    },
   },
   required: ["at"],
 } as const
@@ -178,7 +186,9 @@ export const Limits = Rpc.define({
     changed: {
       schema: {
         type: "object",
-        properties: {},
+        properties: {
+          reason: { type: "string" },
+        },
       } as const,
     },
     updated: {

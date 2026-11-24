@@ -6,6 +6,7 @@ export type UsageSnapshot = {
   rolling?: number
   weekly?: number
   monthly?: number
+  resets?: Partial<Record<WindowKey, number>>
 }
 
 export type LimitRow = {
@@ -145,7 +146,7 @@ export function shouldHideStrip(rows: readonly LimitRow[], autoHideBelow = 0): b
 
 export function isAuthError(text: string | undefined): boolean {
   const raw = (text ?? "").toLowerCase()
-  return raw.includes("401") || raw.includes("403") || raw.includes("unauthorized") || raw.includes("forbidden")
+  return /\b(?:401|403)\b/.test(raw) || raw.includes("unauthorized") || raw.includes("forbidden")
 }
 
 export function formatError(code: ErrorCode | undefined, detail: string | undefined, lang: Locale = "en"): string {

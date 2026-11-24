@@ -34,7 +34,7 @@ const INITIAL_UPDATE_DELAY_MS = 15_000
 const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000
 const USAGE_EVENT_COOLDOWN_MS = 12_000
 const USAGE_EVENT_DEBOUNCE_MS = 1_500
-const HISTORY_KEY = "history:v1"
+const HISTORY_KEY = "history:v2"
 const LAST_GOOD_KEY = "lastGood:v1"
 const SHARED_PREFS_KEY = "sharedPrefs:v1"
 
@@ -88,6 +88,12 @@ function isValidRow(raw: unknown): raw is LimitRow {
     typeof row.used === "number" &&
     Number.isFinite(row.used) &&
     typeof row.status === "string" &&
+    (row.key === undefined ||
+      row.key === "rolling" ||
+      row.key === "weekly" ||
+      row.key === "monthly") &&
+    (row.resetsAtMs === undefined ||
+      (typeof row.resetsAtMs === "number" && Number.isFinite(row.resetsAtMs) && row.resetsAtMs >= 0)) &&
     typeof row.resetsAt === "string" &&
     typeof row.resetsIn === "string"
   )
@@ -99,8 +105,29 @@ function sanitizeSnapshots(raw: unknown): UsageSnapshot[] {
     if (!item || typeof item !== "object") return false
     const snap = item as Record<string, unknown>
     if (typeof snap.at !== "number" || !Number.isFinite(snap.at)) return false
-    return ["rolling", "weekly", "monthly"].every((key) => snap[key] === undefined || typeof snap[key] === "number")
+    if (!["rolling", "weekly", "monthly"].every((key) => snap[key] === undefined || typeof snap[key] === "number")) {
+      return false
+    }
+    if (snap.resets !== undefined) {
+      if (!snap.resets || typeof snap.resets !== "object") return false
+      const resets = snap.resets as Record<string, unknown>
+      const valid = ["rolling", "weekly", "monthly"].every(
+        (key) => resets[key] === undefined || (typeof resets[key] === "number" && Number.isFinite(resets[key])),
+      )
+      if (!valid) return false
+    }
+    return true
   })
+}
+
+function eventIntegrationId(ev: unknown): unknown {
+  if (!ev || typeof ev !== "object" || !("data" in ev)) return undefined
+  const data = ev.data
+  if (!data || typeof data !== "object") return undefined
+  if ("integrationID" in data) return data.integrationID
+  if ("integrationId" in data) return data.integrationId
+  if ("id" in data) return data.id
+  return undefined
 }
 
 async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -204,7 +231,7 @@ export default Plugin.define({
         resetTimer = null
         if (stopEvents.signal.aborted) return
         cache = null
-        void rpcRef?.events.emit("changed", {}).catch(() => {})
+        void rpcRef?.events.emit("changed", { reason: "reset" }).catch(() => {})
       }, delay)
       resetTimer.unref?.()
     }
@@ -392,7 +419,27 @@ export default Plugin.define({
         return formatCached(diskCache, lang, history, true)
       }
 
-      const raw = await startInflight()
+      // A credential change mid-flight makes the response belong to the old account: retry twice at most.
+      const loadForCurrentEpoch = async (): Promise<CachedRaw | null> => {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const loadedEpoch = epoch
+          const result = await startInflight()
+          if (epoch === loadedEpoch) return result
+        }
+        return null
+      }
+      const raw = await loadForCurrentEpoch()
+      if (!raw) {
+        const changed: CachedRaw = {
+          ok: false,
+          errorCode: "FETCH_FAILED",
+          errorDetail: "credentials changed",
+          at: Date.now(),
+          ttl: NEGATIVE_TTL,
+        }
+        cache = changed
+        return formatCached(changed, lang, history, false)
+      }
       return formatCached(raw, lang, history, false)
     }
 
@@ -484,17 +531,28 @@ export default Plugin.define({
                 if (cache && now - cache.at < USAGE_EVENT_COOLDOWN_MS) return
                 lastUsageEmitAt = now
                 cache = null
-                void rpc.events.emit("changed", {}).catch(() => {})
+                void rpc.events.emit("changed", { reason: "usage" }).catch(() => {})
               }, USAGE_EVENT_DEBOUNCE_MS)
               usageDebounce.unref?.()
               continue
+            }
+            const credentialLike =
+              type === "credential.updated" || type === "credential.switched" || type === "integration.updated"
+            if (credentialLike) {
+              const integrationId = eventIntegrationId(ev)
+              const foreign =
+                typeof integrationId === "string" &&
+                integrationId !== "" &&
+                integrationId !== "opencode" &&
+                integrationId !== "opencode-go"
+              if (foreign) continue
             }
             epoch += 1
             cache = null
             // A different credential may belong to another account: never show the old account's card.
             diskCache = null
             creds.dropCli()
-            void rpc.events.emit("changed", {}).catch(() => {})
+            void rpc.events.emit("changed", { reason: "credentials" }).catch(() => {})
           }
         } catch (error) {
           if (!stopEvents.signal.aborted) log("event subscription ended", { error: errorText(error, "en") })

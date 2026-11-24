@@ -35,7 +35,13 @@ export function recordUsageSnapshot(
   const entry: UsageSnapshot = { at: now }
   for (const row of rows) {
     const key = rowWindowKey(row)
-    if (key) entry[key] = row.used
+    if (!key) continue
+    entry[key] = row.used
+    if (typeof row.resetsAtMs === "number" && Number.isFinite(row.resetsAtMs) && row.resetsAtMs > 0) {
+      const resets = entry.resets ?? {}
+      resets[key] = row.resetsAtMs
+      entry.resets = resets
+    }
   }
   const prev = history[history.length - 1]
   if (
@@ -43,7 +49,8 @@ export function recordUsageSnapshot(
     now - prev.at < MIN_HISTORY_INTERVAL_MS &&
     prev.rolling === entry.rolling &&
     prev.weekly === entry.weekly &&
-    prev.monthly === entry.monthly
+    prev.monthly === entry.monthly &&
+    (["rolling", "weekly", "monthly"] as const).every((key) => prev.resets?.[key] === entry.resets?.[key])
   ) {
     return [...history]
   }
@@ -57,6 +64,7 @@ export function recentWindowDelta(
   currentUsed: number,
   now = Date.now(),
   targetSpanMs = 3_600_000,
+  resetsAtMs?: number,
 ): { delta: number; spanMs: number; pctPerHour: number } | null {
   if (!history?.length) return null
   const minAgeMs = 15 * 60_000
@@ -65,6 +73,11 @@ export function recentWindowDelta(
   for (const snap of history) {
     const val = snap[key]
     if (typeof val !== "number") continue
+    // A snapshot from a previous window cannot describe the current one.
+    if (typeof resetsAtMs === "number" && resetsAtMs > 0) {
+      const snapReset = snap.resets?.[key]
+      if (typeof snapReset === "number" && snapReset !== resetsAtMs) continue
+    }
     const ageMs = now - snap.at
     if (ageMs < minAgeMs || ageMs > maxAgeMs) continue
     if (val > currentUsed) continue
@@ -106,7 +119,9 @@ export function selectSnapshotsForClient(
   for (const snap of history.slice(-tailCount)) {
     picked.set(snap.at, snap)
   }
-  return [...picked.values()].sort((a, b) => a.at - b.at)
+  const sorted = [...picked.values()].sort((a, b) => a.at - b.at)
+  // Anchors may exceed a small limit; keep the newest points within budget.
+  return sorted.length > limit ? sorted.slice(-limit) : sorted
 }
 
 export function attachHistoryDeltas(
@@ -118,7 +133,7 @@ export function attachHistoryDeltas(
   return rows.map((row) => {
     const key = rowWindowKey(row)
     if (!key) return row
-    const recent = recentWindowDelta(history, key, row.used, now)
+    const recent = recentWindowDelta(history, key, row.used, now, 3_600_000, row.resetsAtMs)
     if (!recent || recent.delta < 1) return row
     return { ...row, delta1h: Math.round(recent.delta), deltaSpanMs: Math.round(recent.spanMs) }
   })
@@ -143,25 +158,25 @@ export function estimateWindowPace(
   const elapsedMs = Math.max(0, durationMs - remainingMs)
   const elapsedRatio = Math.min(1, Math.max(0, elapsedMs / durationMs))
 
-  if (row.used >= 100) {
+  if (row.used >= 100 || row.status === "limited") {
     return {
       kind: "exhausted",
       key,
       label,
       rate: 0,
-      projectedPct: row.used,
+      projectedPct: Math.max(100, row.used),
       timeToFullMs: 0,
       remainingMs,
       elapsedRatio,
     }
   }
 
-  if (elapsedRatio < 0.01) return null
+  if (elapsedRatio < 0.01 && row.used < 35) return null
 
   const avgRate = row.used / 100 / elapsedRatio
   const avgTimeToFullMs = row.used > 0 ? ((100 - row.used) * elapsedMs) / row.used : Number.POSITIVE_INFINITY
 
-  const recent = recentWindowDelta(history, key, row.used, now)
+  const recent = recentWindowDelta(history, key, row.used, now, 3_600_000, row.resetsAtMs)
   const recentRate =
     recent && recent.delta >= 3
       ? (recent.pctPerHour * (durationMs / 3_600_000)) / 100
@@ -363,8 +378,8 @@ export function buildSparklinePoints(
   const minAt = pts[0].at
   const maxAt = pts[pts.length - 1].at
   const timeSpan = Math.max(1, maxAt - minAt)
-  let minV = 100
-  let maxV = 0
+  let minV = Number.POSITIVE_INFINITY
+  let maxV = Number.NEGATIVE_INFINITY
   for (const p of pts) {
     if (p.v < minV) minV = p.v
     if (p.v > maxV) maxV = p.v
