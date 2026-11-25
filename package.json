@@ -1,6 +1,6 @@
 {
   "name": "opencode-limits-go",
-  "version": "2.0.0",
+  "version": "1.7.0",
   "description": "OpenCode Go usage limits (5h / 1w / 1m) for OpenCode TUI and Desktop GUI",
   "license": "MIT",
   "keywords": [

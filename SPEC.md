@@ -2,7 +2,7 @@
 
 ## Purpose
 
-OpenCode v2.3+ plugin (Node >= 20.3) showing OpenCode Go quota (5h / 1w / 1m) in Desktop GUI and TUI, with pace, risk verdicts, alerts, and OpenCode Zen/today stats. Cards are language-neutral; UIs localize on render.
+OpenCode v2.3+ plugin (Node >= 20) showing OpenCode Go quota (5h / 1w / 1m) in Desktop GUI and TUI, with pace, risk verdicts, alerts, and OpenCode Zen/today stats. Cards are language-neutral; UIs localize on render.
 
 ## Layers
 
