@@ -269,7 +269,7 @@ export const GUI_I18N = {
     "settings.stripReset.warn": "При пороге и 100%",
     "settings.stripReset.always": "Всегда",
     "settings.labels.title": "Подписи окон",
-    "settings.labels.description": "Показывать префиксы 5ч, 1н, 1м",
+    "settings.labels.description": "Показывать префиксы 5ч, 1нед, 1мес",
     "settings.remaining.title": "Показывать остаток %",
     "settings.remaining.description": "Показывать сколько % осталось вместо расхода (общее с TUI)",
     "settings.paceIcon.title": "Иконка темпа (⚡) на полоске",

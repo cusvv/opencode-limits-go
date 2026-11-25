@@ -1,18 +1,4 @@
-import { type LimitRow, type Locale, type UsageSnapshot, rowWindowKey, windowLabel } from "./types.ts"
-import { resetText, span } from "./format.ts"
-
-export function alertMessage(row: LimitRow, now = Date.now(), lang: Locale = "en"): string {
-  const label = windowLabel(row, lang)
-  const { passed, text } = resetText(row.resetsAtMs, row.resetsIn, now, lang)
-  const suffix = passed ? ` (${text})` : lang === "ru" ? `, сброс: ${text}` : `, resets: ${text}`
-  if (row.status === "limited" && row.used < 100) {
-    return lang === "ru"
-      ? `Лимит ${label} исчерпан (в API ${row.used}%)${suffix}`
-      : `${label} limit reached (${row.used}% reported)${suffix}`
-  }
-  if (lang === "ru") return `Лимит ${label}: ${row.used}%${suffix}`
-  return `Limit ${label}: ${row.used}%${suffix}`
-}
+import { type LimitRow, type UsageSnapshot, rowWindowKey } from "./types.ts"
 
 // Track the highest threshold seen per window so notifications fire once per crossing and reset after drop.
 export function newAlerts(rows: LimitRow[], notified: Map<string, number>, warnThreshold = 80): LimitRow[] {
@@ -43,13 +29,6 @@ export function recoveredAlerts(rows: LimitRow[], wasExhausted: Set<string>): Li
     }
   }
   return recovered
-}
-
-export function resetAlertMessage(row: LimitRow, lang: Locale = "en"): string {
-  const label = windowLabel(row, lang)
-  return lang === "ru"
-    ? `Лимит ${label} сброшен — сейчас ${row.used}%`
-    : `${label} limit reset — now at ${row.used}%`
 }
 
 export type BurnSpike = {
@@ -83,12 +62,4 @@ export function detectBurnSpike(
     }
   }
   return best ? { row, delta: best.delta, spanMs: best.spanMs } : null
-}
-
-export function burnSpikeMessage(spike: BurnSpike, lang: Locale = "en"): string {
-  const lbl = windowLabel(spike.row, lang)
-  const duration = span(spike.spanMs, lang)
-  return lang === "ru"
-    ? `Быстрый расход ${lbl}: +${Math.round(spike.delta)}% за ${duration}`
-    : `Fast burn on ${lbl}: +${Math.round(spike.delta)}% in ${duration}`
 }

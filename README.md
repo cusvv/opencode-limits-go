@@ -57,13 +57,13 @@ TUI is intentionally one line in the sidebar:
 ### Credentials and updates
 - Works with OpenCode Console **OAuth** (`opencode`), saved **API keys** (`opencode-go` / `opencode`), env vars (`OPENCODE_GO_API_KEY`, `OPENCODE_API_KEY`, `OPENCODE_ZEN_API_KEY`), plugin options, `opencode auth export`, and legacy `auth.json`.
 - Tokens never leave the server process — never sent over RPC, never shown in the UI, and redacted from logs.
-- **Dev installs (`git clone` or `local-plugins`) are never overwritten** by the updater. Release installs update only from a release that ships `SHA256SUMS`, with a version check, archive-listing validation, process lock, and `package.json` written last.
+- **Dev installs (`git clone` or `local-plugins`) are never overwritten** by the updater. Release installs update only from a release that ships `SHA256SUMS`, with a version check, fail-closed archive-listing preflight, an owner-token process lock, size caps, and `package.json` written last. The update check cache is still honored for dev and package-manager installs (they are never auto-installed).
 
 ---
 
 ## Installation
 
-Requires **OpenCode v2.3.0+** and an active OpenCode Go credential (`opencode auth login` or `OPENCODE_API_KEY`).
+Requires **OpenCode v2.3.0+**, **Node.js >= 20.3** for local/CLI installs, and an active OpenCode Go credential (`opencode auth login` or `OPENCODE_API_KEY`).
 
 ### Option 1: OpenCode CLI (recommended)
 
@@ -178,7 +178,11 @@ opencode plugin list
 opencode api post /api/rpc/opencode-limits-go/status --data '{"input":{"force":true}}'
 ```
 
-A healthy response has `"ok": true` and a non-empty `rows` array. `"ok": false` includes an actionable `error` (`NO_TOKEN`, expired token, rate limit, or network failure).
+A healthy response has `"ok": true` and a non-empty `rows` array with language-neutral values (`label`: `5h`/`1w`/`1m`, `resetsIn`: `""` or `"?"`). A failure has `"ok": false` and an authoritative machine-readable `errorCode` (`NO_TOKEN`, `AUTH`, `RATE_LIMIT`, `OFFLINE`, `BAD_RESPONSE`, `CREDENTIALS_CHANGED`, `INTERNAL`); the legacy `error` field repeats that code. `lang` is deprecated and ignored — the UI localizes the card on render. Example:
+
+```json
+{ "ok": false, "errorCode": "AUTH", "error": "AUTH", "errorDetail": "HTTP 401: invalid token", "tight": "" }
+```
 
 ---
 
@@ -223,7 +227,7 @@ Follows your OpenCode UI language (**English** / **Russian**), or can be overrid
 
 ```sh
 npm install
-npm test          # core + server unit tests
+npm test          # core + server + ui-state + present tests (contract, parity, alerts)
 npm run build     # typecheck server/TUI/GUI and rebuild dist/gui-experimental.cjs
 ```
 
@@ -231,28 +235,24 @@ npm run build     # typecheck server/TUI/GUI and rebuild dist/gui-experimental.c
 
 ```text
 src/
-  index.ts              Server plugin: RPC endpoints, disk/memory cache, reset-aligned timers
-  rpc.ts                Portable RPC contract (status, getPrefs/setPrefs, updates, events)
-  gui.tsx               Desktop GUI entrypoint (SolidJS + OpenCode GUI SDK)
-  tui.tsx               TUI entrypoint
+  index.ts              Wiring: plugin setup, RPC handlers, timers
+  rpc.ts / rpc/         Portable RPC contract (status, prefs, updates, diagnostics, events)
+  gui.tsx, tui.tsx      Desktop/TUI entrypoints
+  gui/, tui/            Presentation only (Solid GUI modules, terminal UI modules)
 
-  core/                 Pure domain logic
-    types.ts            Types, window risk ranking, error text
-    format.ts           Dates, durations, usage parsing, error labels
-    pace.ts             Snapshot ring buffer, pace, verdicts, sparkline data
-    alerts.ts           Threshold, reset recovery, fast-burn detectors
-    stats.ts            Provider spend & top-model aggregation
-    summary.ts          TUI sidebar & detail formatter
-    utils.ts            Secret redaction, retry, semver
+  core/                 Domain: types, parsing, window risk, pace, alert detection, stats
+  present/              Copy/format: labels, durations, errors, alerts, verdicts, TUI text
+  i18n/                 EN/RU dictionaries, typed keys, parity
+  ui-state/             Single-flight poller, alert reducer, shared-pref application
+  settings/             Shared prefs schema, defaults, sanitize, merge
 
-  server/               Node / IO layer
+  server/
     api.ts              OpenCode Go HTTP client with Retry-After
-    auth.ts             Multi-source credential discovery
-    updater.ts          Checksum-verified GitHub updater with dev-install guard
     log.ts              Private rotating JSON logger
-
-  gui/                  Desktop GUI modules
-  tui/                  Terminal UI modules
+    platform.ts         Platform helpers (signals, paths)
+    service/            Cache, history, identity, prefs, status, events, storage
+    credentials/        auth facade + identity/resolver/sources
+    updater/            Checksum-verified GitHub release check, install, rollback
 
 dist/
   gui-experimental.cjs  Prebuilt CommonJS Desktop GUI bundle

@@ -2,22 +2,34 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
   CodedError,
-  alertMessage,
-  bar,
-  cardDetail,
-  cardText,
+  accountKey,
+  attachHistoryDeltas,
+  buildSparklinePoints,
   compareSemver,
+  detectBurnSpike,
   emptyCard,
   errorText,
-  formatError,
+  estimateWindowPace,
+  filterStripRows,
+  isAuthError,
   isNewerVersion,
   newAlerts,
+  nextResetDelayMs,
   normalizeLocale,
+  paceSummary,
   parseUsage,
+  recordUsageSnapshot,
+  recoveredAlerts,
+  redactSecrets,
   retry,
-  sourceLabel,
-  span,
-  tightLine,
+  rowWindowKey,
+  selectSnapshotsForClient,
+  selectStripRows,
+  shouldHideStrip,
+  summarizeStatsByProvider,
+  tightestRow,
+  windowElapsedRatio,
+  windowVerdict,
 } from "./index.ts"
 
 const NOW = Date.parse("2026-11-17T10:00:00Z")
@@ -27,29 +39,6 @@ test("normalizeLocale picks ru only for Russian locales", () => {
   assert.equal(normalizeLocale("ru-RU"), "ru")
   assert.equal(normalizeLocale("en-US"), "en")
   assert.equal(normalizeLocale(undefined), "en")
-})
-
-test("span: past reset is reported as passed, not as 'less than a minute'", () => {
-  assert.equal(span(-5 * 60_000, "ru"), "сброс прошёл, обнови")
-  assert.equal(span(0, "ru"), "сброс прошёл, обнови")
-  assert.equal(span(0, "en"), "reset passed, refresh")
-})
-
-test("span: formats minutes, hours and days in EN and RU", () => {
-  assert.equal(span(10_000, "ru"), "< 1 мин")
-  assert.equal(span(10_000, "en"), "< 1m")
-  assert.equal(span(30_000, "ru"), "1м")
-  assert.equal(span(12 * 60_000, "en"), "12m")
-  assert.equal(span(3 * 3_600_000 + 5 * 60_000, "ru"), "3ч 05м")
-  assert.equal(span(3 * 3_600_000 + 5 * 60_000, "en"), "3h 05m")
-  assert.equal(span(2 * 86_400_000 + 4 * 3_600_000, "ru"), "2д 4ч")
-  assert.equal(span(2 * 86_400_000 + 4 * 3_600_000, "en"), "2d 4h")
-})
-
-test("bar: clamps out-of-range percents", () => {
-  assert.equal(bar(-5, 4), "░░░░")
-  assert.equal(bar(150, 4), "████")
-  assert.equal(bar(50, 4), "██░░")
 })
 
 test("parseUsage: maps the three windows, numeric resetsAt, and limited flag", () => {
@@ -62,15 +51,13 @@ test("parseUsage: maps the three windows, numeric resetsAt, and limited flag", (
       },
     },
     NOW,
-    "en",
   )
   assert.deepEqual(rows.map((r) => r.label), ["5h", "1w", "1m"])
   assert.deepEqual(rows.map((r) => r.key), ["rolling", "weekly", "monthly"])
   assert.equal(rows[0].used, 12)
-  assert.equal(rows[0].resetsIn, "2h 00m")
+  assert.equal(rows[0].resetsIn, "")
   assert.equal(rows[1].status, "limited")
-  assert.equal(rows[1].resetsIn, "1h 00m")
-  assert.equal(rows[2].resetsIn, "2h 00m")
+  assert.equal(rows[2].resetsAtMs, NOW + 7_200_000)
 })
 
 test("parseUsage: rejects empty strings, booleans, arrays, and null percents", () => {
@@ -93,39 +80,17 @@ test("parseUsage: empty or foreign payload throws EMPTY_USAGE", () => {
   )
 })
 
-test("formatError translates server error codes into EN and RU", () => {
-  assert.match(formatError("NO_TOKEN", undefined, "en"), /No OpenCode Go token found/)
-  assert.match(formatError("NO_TOKEN", undefined, "ru"), /Нет токена OpenCode Go/)
-  assert.equal(formatError("INVALID_PERCENT", "rolling", "en"), "Window 5h: invalid percent")
-  assert.equal(formatError("INVALID_PERCENT", "rolling", "ru"), "Окно 5ч: некорректный процент")
-})
-
-test("cardText, tightLine, alertMessage, cardDetail format cleanly in EN and RU", () => {
-  const rows = parseUsage(
-    { usage: { rolling: { percent: 5 }, monthly: { percent: 44, resetsAt: NOW - 10_000 } } },
-    NOW,
-    "en",
-  )
-  const card = { ...emptyCard(""), ok: true, checkedAt: "10:00:00", source: "integration:key", rows }
-  assert.equal(cardText(card, "ru"), "5ч 5% · 1мес 44%")
-  assert.equal(cardText(card, "en"), "5h 5% · 1m 44%")
-  assert.equal(tightLine(rows, NOW, "ru"), "Риск: 1мес — 44%, запас 56% (сброс прошёл, обнови)")
-  assert.equal(tightLine(rows, NOW, "en"), "At risk: 1m — 44%, 56% left (reset passed, refresh)")
-  assert.equal(alertMessage(rows[1], NOW, "ru"), "Лимит 1мес: 44% (сброс прошёл, обнови)")
-  assert.equal(alertMessage(rows[1], NOW, "en"), "Limit 1m: 44% (reset passed, refresh)")
-  assert.equal(sourceLabel("integration:key", "en"), "OpenCode integration (API key)")
-  const detailRu = cardDetail(card, NOW, "ru")
-  assert.match(detailRu, /^Проверено: 10:00:00 · интеграция OpenCode \(API-ключ\)/)
-  assert.doesNotMatch(detailRu, /сброс через сброс прошёл/)
-})
-
-test("errorText redacts Bearer, prefixed secrets, and JWTs", async () => {
-  const { redactSecrets } = await import("./index.ts")
+test("errorText redacts Bearer, prefixed secrets, and JWTs", () => {
   const msg = errorText(new Error("failed with Bearer sk-ant-secret123 and st_abcdef12345 and gho_secret999"))
   assert.doesNotMatch(msg, /secret123|abcdef12345|secret999/)
   assert.match(msg, /\[REDACTED\]/)
   const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123"
   assert.doesNotMatch(redactSecrets(`token ${jwt}`), /eyJhbGci/)
+})
+
+test("errorText keeps coded errors technical, without UI templates", () => {
+  assert.equal(errorText(new CodedError("INVALID_PERCENT", "rolling")), "INVALID_PERCENT: rolling")
+  assert.equal(errorText(new CodedError("EMPTY_USAGE")), "EMPTY_USAGE")
 })
 
 test("newAlerts: alerts once per threshold crossing and again after a reset", () => {
@@ -189,8 +154,7 @@ test("retry stops on the first success, does not pause after final attempt, and 
   assert.equal(calls, 1)
 })
 
-test("estimateWindowPace suppresses tiny/early-window noise and flags heavy bursts", async () => {
-  const { estimateWindowPace, paceSummary } = await import("./index.ts")
+test("estimateWindowPace suppresses tiny/early-window noise and flags heavy bursts", () => {
   const now = 1_700_000_000_000
   const weekMs = 7 * 24 * 60 * 60 * 1000
 
@@ -204,7 +168,7 @@ test("estimateWindowPace suppresses tiny/early-window noise and flags heavy burs
     resetsAtMs: now + Math.round(weekMs * 0.97),
     status: "ok",
   }
-  assert.equal(estimateWindowPace(earlyNoise, now, "en"), null)
+  assert.equal(estimateWindowPace(earlyNoise, now), null)
 
   // Low usage (<10%) later in window -> suppressed (null)
   const tinyUsage = {
@@ -216,7 +180,7 @@ test("estimateWindowPace suppresses tiny/early-window noise and flags heavy burs
     resetsAtMs: now + Math.round(weekMs * 0.45),
     status: "ok",
   }
-  assert.equal(estimateWindowPace(tinyUsage, now, "en"), null)
+  assert.equal(estimateWindowPace(tinyUsage, now), null)
 
   // Heavy burst early in window (>=35% used at 5% elapsed) -> flagged as hot
   const burst = {
@@ -228,9 +192,9 @@ test("estimateWindowPace suppresses tiny/early-window noise and flags heavy burs
     resetsAtMs: now + Math.round(weekMs * 0.95),
     status: "ok",
   }
-  const burstPace = estimateWindowPace(burst, now, "en")
+  const burstPace = estimateWindowPace(burst, now)
   assert.equal(burstPace?.kind, "hot")
-  assert.ok(paceSummary([burst], now, "en")?.text.includes("Pace"))
+  assert.equal(paceSummary([burst], now)?.kind, "hot")
 
   // Steady comfortable pace (26% used at 34% elapsed -> projected ~76%)
   const steady = {
@@ -242,9 +206,9 @@ test("estimateWindowPace suppresses tiny/early-window noise and flags heavy burs
     resetsAtMs: now + Math.round(weekMs * 0.66),
     status: "ok",
   }
-  const steadyPace = estimateWindowPace(steady, now, "en")
+  const steadyPace = estimateWindowPace(steady, now)
   assert.equal(steadyPace?.kind, "steady")
-  assert.ok(paceSummary([steady], now, "en")?.text.includes("comfortable"))
+  assert.equal(paceSummary([steady], now)?.kind, "steady")
 
   // Exhausted window (100%)
   const exhausted = {
@@ -256,49 +220,15 @@ test("estimateWindowPace suppresses tiny/early-window noise and flags heavy burs
     resetsAtMs: now + 2 * 3600_000,
     status: "limited",
   }
-  const summary = paceSummary([exhausted, steady], now, "ru")
+  const summary = paceSummary([exhausted, steady], now)
   assert.equal(summary?.kind, "exhausted")
-  assert.ok(summary?.text.includes("исчерпан"))
+  assert.equal(summary?.windowKey, "rolling")
 })
 
-test("cardDetail appends smart pace line when significant", async () => {
-  const { cardDetail } = await import("./index.ts")
-  const now = 1_700_000_000_000
-  const weekMs = 7 * 24 * 60 * 60 * 1000
-
-  const card = {
-    ok: true as const,
-    org: "OpenCode",
-    email: "user@example.com",
-    source: "key" as const,
-    checkedAt: "12:00",
-    checkedAtMs: now,
-    tight: "",
-    error: "",
-    rows: [
-      {
-        key: "weekly" as const,
-        label: "Weekly",
-        used: 70,
-        resetsIn: "4d 12h",
-        resetsAt: "Fri",
-        resetsAtMs: now + Math.round(weekMs * 0.64),
-        status: "ok",
-      },
-    ],
-  }
-
-  const detailEn = cardDetail(card, now, "en")
-  const detailRu = cardDetail(card, now, "ru")
-  assert.ok(detailEn.includes("Pace (1w):"))
-  assert.ok(detailRu.includes("Темп (1нед):"))
-})
-
-test("filterStripRows selects enabled windows and falls back if none are selected", async () => {
-  const { filterStripRows, rowWindowKey } = await import("./index.ts")
+test("filterStripRows selects enabled windows and falls back if none are selected", () => {
   const rows = [
     { key: "rolling" as const, label: "5h", used: 12, status: "ok", resetsAt: "", resetsIn: "" },
-    { label: "1нед", used: 40, status: "ok", resetsAt: "", resetsIn: "" },
+    { key: "weekly" as const, label: "1w", used: 40, status: "ok", resetsAt: "", resetsIn: "" },
     { key: "monthly" as const, label: "1m", used: 65, status: "ok", resetsAt: "", resetsIn: "" },
   ]
 
@@ -311,8 +241,7 @@ test("filterStripRows selects enabled windows and falls back if none are selecte
   assert.equal(fallbackAll.length, 3)
 })
 
-test("history ring buffer computes recent deltas, detects late-window bursts, and calculates elapsed ratio", async () => {
-  const { attachHistoryDeltas, estimateWindowPace, recordUsageSnapshot, windowElapsedRatio } = await import("./index.ts")
+test("history ring buffer computes recent deltas, detects late-window bursts, and calculates elapsed ratio", () => {
   const now = 1_700_000_000_000
   const weekMs = 7 * 86_400_000
 
@@ -338,16 +267,14 @@ test("history ring buffer computes recent deltas, detects late-window bursts, an
   const [withDelta] = attachHistoryDeltas([row], history, now)
   assert.equal(withDelta.delta1h, 12)
 
-  const pace = estimateWindowPace(row, now, "en", history)
+  const pace = estimateWindowPace(row, now, history)
   assert.equal(pace?.kind, "hot")
 
   const ratio = windowElapsedRatio(row, now)
   assert.ok(ratio !== null && Math.abs(ratio - 0.7) < 0.01)
 })
 
-test("newAlerts supports custom warning thresholds and summarizeStatsByProvider splits Go vs Zen", async () => {
-  const { formatTokensCompact, formatUsd, newAlerts, summarizeStatsByProvider } = await import("./index.ts")
-
+test("newAlerts supports custom warning thresholds and summarizeStatsByProvider splits Go vs Zen", () => {
   const notified = new Map<string, number>()
   const rows = [{ key: "rolling" as const, label: "5h", used: 72, status: "ok", resetsAt: "", resetsIn: "" }]
   assert.equal(newAlerts(rows, notified, 80).length, 0)
@@ -365,44 +292,9 @@ test("newAlerts supports custom warning thresholds and summarizeStatsByProvider 
   assert.equal(summary.zenSteps, 3)
   assert.ok(Math.abs(summary.zenCostUsd - 0.045) < 1e-6)
   assert.ok(Math.abs(summary.totalCostUsd - 0.065) < 1e-6)
-  assert.equal(formatTokensCompact(1700), "2k")
-  assert.equal(formatTokensCompact(1_500_000), "1.5M")
-  assert.equal(formatUsd(0.046), "$0.05")
-  assert.equal(formatUsd(0.004), "$0.0040")
 })
 
-test("formatTuiSidebar supports window filter, inline mini-bars, and hot pace indicator", async () => {
-  const { cardDetail, formatTuiSidebar } = await import("./index.ts")
-  const now = 1_700_000_000_000
-  const hourMs = 3_600_000
-  const card = {
-    ok: true as const,
-    org: "Personal",
-    email: "dev@example.com",
-    source: "integration:oauth",
-    checkedAt: "14:20:05",
-    tight: "",
-    error: "",
-    rows: [
-      { key: "rolling" as const, label: "5h", used: 50, status: "ok", resetsAt: "18:00", resetsAtMs: now + 4 * hourMs, resetsIn: "4h", delta1h: 12 },
-      { key: "weekly" as const, label: "1w", used: 26, status: "ok", resetsAt: "Sun", resetsAtMs: now + 5 * 86_400_000, resetsIn: "5d" },
-    ],
-  }
-
-  const plain = formatTuiSidebar(card, { rolling: true, weekly: false, monthly: false }, false, "en", now)
-  assert.equal(plain, "5h 50%⚡")
-
-  const withBars = formatTuiSidebar(card, { rolling: true, weekly: true, monthly: false }, true, "en", now)
-  assert.ok(withBars.includes("5h ██░░ 50%⚡"))
-  assert.ok(withBars.includes("1w █░░░ 26%"))
-
-  const detail = cardDetail(card, now, "en", ["Today: Go 142k tok · Zen $0.04"])
-  assert.ok(detail.includes("+12%"))
-  assert.ok(detail.includes("Today: Go 142k tok · Zen $0.04"))
-})
-
-test("tightest mode ranks by projected risk, not raw percent", async () => {
-  const { selectStripRows, windowVerdict } = await import("./index.ts")
+test("selectStripRows tightest mode ranks by projected risk, not raw percent", () => {
   const now = Date.now()
   const rows = [
     {
@@ -426,39 +318,14 @@ test("tightest mode ranks by projected risk, not raw percent", async () => {
   ]
   const pick = selectStripRows(rows, { rolling: true, weekly: true, monthly: true }, "tightest", now)
   assert.equal(pick[0].key, "weekly")
-  const verdict = windowVerdict(rows[1], now, "en")
+  const verdict = windowVerdict(rows[1], now)
   assert.equal(verdict?.kind, "tight")
+  assert.equal(verdict?.labelKey, "weekly")
+  assert.equal("text" in (verdict ?? {}), false)
+  assert.equal(tightestRow(rows, now)?.key, "weekly")
 })
 
-test("formatTuiSidebar uses remaining % for the bar and shows reset countdown above warning", async () => {
-  const { formatTuiSidebar } = await import("./index.ts")
-  const now = Date.now()
-  const card = {
-    ok: true as const,
-    org: "",
-    email: "",
-    checkedAt: "",
-    source: "",
-    tight: "",
-    error: "",
-    rows: [
-      {
-        key: "rolling" as const,
-        label: "5h",
-        used: 92,
-        status: "ok",
-        resetsAt: "",
-        resetsAtMs: now + 20 * 60_000,
-        resetsIn: "",
-      },
-    ],
-  }
-  const text = formatTuiSidebar(card, { rolling: true, weekly: false, monthly: false }, true, "en", now, true, 80)
-  assert.match(text, /5h ░░░░ 8% \(20m\)/)
-})
-
-test("recoveredAlerts detects drop from 100% and resetAlertMessage localizes cleanly", async () => {
-  const { recoveredAlerts, resetAlertMessage } = await import("./index.ts")
+test("recoveredAlerts detects drop from 100%", () => {
   const exhausted = new Set<string>()
   const rowFull = { key: "rolling" as const, label: "5h", used: 100, status: "limited", resetsAt: "", resetsIn: "" }
   const rowReset = { key: "rolling" as const, label: "5h", used: 0, status: "ok", resetsAt: "", resetsIn: "" }
@@ -469,36 +336,16 @@ test("recoveredAlerts detects drop from 100% and resetAlertMessage localizes cle
   const rec = recoveredAlerts([rowReset], exhausted)
   assert.equal(rec.length, 1)
   assert.equal(exhausted.has("rolling"), false)
-  assert.match(resetAlertMessage(rec[0], "en"), /5h limit reset/)
-  assert.match(resetAlertMessage(rec[0], "ru"), /Лимит 5ч сброшен/)
 
   // Second poll at 0% must not re-fire.
   assert.equal(recoveredAlerts([rowReset], exhausted).length, 0)
 })
 
-test("shortErrorLabel, relativeAge, displayPercent, and accountKey work as expected", async () => {
-  const { accountKey, displayPercent, relativeAge, shortErrorLabel } = await import("./index.ts")
-  assert.equal(shortErrorLabel("No OpenCode Go token found. Run: opencode auth login", "en"), "no token")
-  assert.equal(shortErrorLabel("Нет токена OpenCode Go. Выполни...", "ru"), "нет токена")
-  assert.equal(shortErrorLabel("HTTP 401: Unauthorized", "en"), "auth error")
-  assert.equal(shortErrorLabel("HTTP 429: Too Many Requests", "ru"), "слишком часто")
-  assert.equal(shortErrorLabel("fetch failed: ECONNREFUSED", "en"), "offline")
-  assert.equal(shortErrorLabel("some random failure", "ru"), "ошибка")
-
-  assert.equal(displayPercent(82, false), 82)
-  assert.equal(displayPercent(82, true), 18)
-  assert.equal(displayPercent(120, true), 0)
-
-  assert.equal(relativeAge(NOW - 10_000, NOW, "en"), "just now")
-  assert.equal(relativeAge(NOW - 10_000, NOW, "ru"), "только что")
-  assert.equal(relativeAge(NOW - 5 * 60_000, NOW, "en"), "5m ago")
-  assert.equal(relativeAge(NOW - 2 * 3_600_000, NOW, "ru"), "2ч назад")
-
+test("accountKey normalizes org, email, and source", () => {
   assert.equal(accountKey(" Personal ", "Dev@Example.com", "integration:oauth"), "personal|dev@example.com|integration:oauth")
 })
 
-test("selectSnapshotsForClient preserves 15m-4h anchor snapshots during rapid bursts", async () => {
-  const { selectSnapshotsForClient } = await import("./index.ts")
+test("selectSnapshotsForClient preserves 15m-4h anchor snapshots during rapid bursts", () => {
   const now = 1_700_000_000_000
   const history = [
     { at: now - 90 * 60_000, rolling: 10 },
@@ -517,8 +364,7 @@ test("selectSnapshotsForClient preserves 15m-4h anchor snapshots during rapid bu
   assert.equal(selected[selected.length - 1].at, history[history.length - 1].at)
 })
 
-test("summarizeStatsByProvider extracts topModels and formatTuiSidebar shows remaining % and exhausted reset countdown", async () => {
-  const { formatTuiSidebar, summarizeStatsByProvider } = await import("./index.ts")
+test("summarizeStatsByProvider extracts topModels", () => {
   const summary = summarizeStatsByProvider([
     { model: { providerID: "opencode-go", modelID: "claude-sonnet" }, steps: 12, cost: 0, tokens: { input: 80_000, output: 18_000, reasoning: 0 } },
     { model: { providerID: "opencode-go", modelID: "gemini-pro" }, steps: 5, cost: 0, tokens: { input: 40_000, output: 4_000, reasoning: 0 } },
@@ -529,39 +375,9 @@ test("summarizeStatsByProvider extracts topModels and formatTuiSidebar shows rem
   assert.equal(summary.topModels[0].modelID, "claude-sonnet")
   assert.equal(summary.topModels[0].tokens, 98_000)
   assert.equal(summary.topModels[1].modelID, "gemini-pro")
-
-  const now = 1_700_000_000_000
-  const card = {
-    ok: true as const,
-    org: "Personal",
-    email: "",
-    source: "",
-    checkedAt: "",
-    tight: "",
-    error: "",
-    rows: [
-      { key: "rolling" as const, label: "5h", used: 100, status: "limited", resetsAt: "", resetsAtMs: now + 42 * 60_000, resetsIn: "42m" },
-      { key: "weekly" as const, label: "1w", used: 30, status: "ok", resetsAt: "", resetsAtMs: now + 3 * 86_400_000, resetsIn: "3d" },
-    ],
-  }
-  const exhaustedText = formatTuiSidebar(card, { rolling: true, weekly: true, monthly: false }, false, "en", now, false)
-  assert.equal(exhaustedText, "5h 100% (42m) · 1w 30%")
-
-  const remainingText = formatTuiSidebar(card, { rolling: true, weekly: true, monthly: false }, false, "en", now, true)
-  assert.equal(remainingText, "5h 0% (42m) · 1w 70%")
 })
 
-test("selectStripRows tightest mode, shouldHideStrip, 12h shortDate, nextResetDelayMs, detectBurnSpike, and buildSparklinePoints", async () => {
-  const {
-    buildSparklinePoints,
-    burnSpikeMessage,
-    detectBurnSpike,
-    nextResetDelayMs,
-    selectStripRows,
-    shortDate,
-    shouldHideStrip,
-  } = await import("./index.ts")
-
+test("selectStripRows tightest mode, shouldHideStrip, nextResetDelayMs, detectBurnSpike, and buildSparklinePoints", () => {
   const now = Date.parse("2026-11-19T15:30:00Z")
   const rows = [
     { key: "rolling" as const, label: "5h", used: 35, status: "ok", resetsAt: "", resetsAtMs: now + 2 * 3_600_000, resetsIn: "2h" },
@@ -576,7 +392,6 @@ test("selectStripRows tightest mode, shouldHideStrip, 12h shortDate, nextResetDe
   assert.equal(shouldHideStrip(rows, 70), true)
   assert.equal(shouldHideStrip(rows, 50), false)
 
-  assert.match(shortDate(now, "12h"), /\d{2}\.\d{2} \d{1,2}:\d{2} (?:AM|PM)/)
   assert.equal(nextResetDelayMs(rows, now), 2 * 3_600_000 + 3_000)
 
   const snaps = [
@@ -587,8 +402,6 @@ test("selectStripRows tightest mode, shouldHideStrip, 12h shortDate, nextResetDe
   const spike = detectBurnSpike(rows, snaps, 20, now)
   assert.ok(spike !== null)
   assert.equal(spike.delta, 25)
-  assert.match(burnSpikeMessage(spike, "en"), /Fast burn on 5h: \+25%/)
-  assert.match(burnSpikeMessage(spike, "ru"), /Быстрый расход 5ч: \+25%/)
 
   const spark = buildSparklinePoints(snaps, "rolling", 200, 24)
   assert.ok(spark !== null)
@@ -598,8 +411,7 @@ test("selectStripRows tightest mode, shouldHideStrip, 12h shortDate, nextResetDe
   assert.ok(spark.polyline.includes(","))
 })
 
-test("limited status counts as exhausted for pace, verdict and alerts", async () => {
-  const { estimateWindowPace, newAlerts, windowVerdict } = await import("./index.ts")
+test("limited status counts as exhausted for pace, verdict and alerts", () => {
   const now = 1_700_000_000_000
   const row = {
     key: "weekly" as const,
@@ -610,18 +422,17 @@ test("limited status counts as exhausted for pace, verdict and alerts", async ()
     resetsAtMs: now + 2 * 86_400_000,
     resetsIn: "2d",
   }
-  const pace = estimateWindowPace(row, now, "en")
+  const pace = estimateWindowPace(row, now)
   assert.equal(pace?.kind, "exhausted")
   assert.ok((pace?.projectedPct ?? 0) >= 100)
-  assert.equal(windowVerdict(row, now, "en")?.kind, "exhausted")
+  assert.equal(windowVerdict(row, now)?.kind, "exhausted")
 
   const notified = new Map<string, number>()
   assert.equal(newAlerts([row], notified).length, 1)
   assert.equal(newAlerts([row], notified).length, 0)
 })
 
-test("heavy usage just after reset is still flagged hot", async () => {
-  const { estimateWindowPace } = await import("./index.ts")
+test("heavy usage just after reset is still flagged hot", () => {
   const now = 1_700_000_000_000
   const weekMs = 7 * 86_400_000
   const row = {
@@ -633,11 +444,10 @@ test("heavy usage just after reset is still flagged hot", async () => {
     resetsAtMs: now + Math.round(weekMs * 0.995),
     resetsIn: "6d 23h",
   }
-  assert.equal(estimateWindowPace(row, now, "en")?.kind, "hot")
+  assert.equal(estimateWindowPace(row, now)?.kind, "hot")
 })
 
-test("history snapshots from a previous window are ignored", async () => {
-  const { attachHistoryDeltas, estimateWindowPace, recordUsageSnapshot } = await import("./index.ts")
+test("history snapshots from a previous window are ignored", () => {
   const now = 1_700_000_000_000
   const newReset = now + 2.5 * 3_600_000
   const oldReset = newReset - 5 * 3_600_000
@@ -655,21 +465,20 @@ test("history snapshots from a previous window are ignored", async () => {
 
   const stale = [{ at: now - 3_600_000, rolling: 2, resets: { rolling: oldReset } }]
   assert.equal(attachHistoryDeltas([row], stale, now)[0].delta1h, undefined)
-  assert.notEqual(estimateWindowPace(row, now, "en", stale)?.kind, "hot")
+  assert.notEqual(estimateWindowPace(row, now, stale)?.kind, "hot")
 
   const current = [{ at: now - 3_600_000, rolling: 2, resets: { rolling: newReset } }]
   assert.equal(attachHistoryDeltas([row], current, now)[0].delta1h, 38)
-  assert.equal(estimateWindowPace(row, now, "en", current)?.kind, "hot")
+  assert.equal(estimateWindowPace(row, now, current)?.kind, "hot")
 })
 
-test("isAuthError ignores numeric substrings inside longer numbers", async () => {
-  const { isAuthError } = await import("./index.ts")
+test("isAuthError ignores numeric substrings inside longer numbers", () => {
   assert.equal(isAuthError("account 1401 not found"), false)
   assert.equal(isAuthError("HTTP 401: Unauthorized"), true)
   assert.equal(isAuthError("HTTP 403 Forbidden"), true)
 })
 
-test("parseUsage accepts numeric reset strings and rejects implausible dates", async () => {
+test("parseUsage accepts numeric reset strings and rejects implausible dates", () => {
   const now = Date.parse("2026-11-17T10:00:00Z")
   const rows = parseUsage(
     {
@@ -680,23 +489,16 @@ test("parseUsage accepts numeric reset strings and rejects implausible dates", a
       },
     },
     now,
-    "en",
   )
   assert.equal(rows[0].resetsAtMs, now + 3_600_000)
   assert.equal(rows[1].resetsAtMs, 0)
   assert.equal(rows[2].resetsAtMs, 1_700_000_000_000)
 
-  const farFuture = parseUsage({ usage: { rolling: { percent: 5, resetsAt: "2999-01-01T00:00:00Z" } } }, now, "en")
+  const farFuture = parseUsage({ usage: { rolling: { percent: 5, resetsAt: "2999-01-01T00:00:00Z" } } }, now)
   assert.equal(farFuture[0].resetsAtMs, 0)
 })
 
-test("formatTokensCompact promotes just-below-million counts", async () => {
-  const { formatTokensCompact } = await import("./index.ts")
-  assert.equal(formatTokensCompact(999_999), "1.0M")
-})
-
-test("buildSparklinePoints computes min and max above 100", async () => {
-  const { buildSparklinePoints } = await import("./index.ts")
+test("buildSparklinePoints computes min and max above 100", () => {
   const now = 1_700_000_000_000
   const spark = buildSparklinePoints(
     [
@@ -713,8 +515,7 @@ test("buildSparklinePoints computes min and max above 100", async () => {
   assert.equal(spark.max, 110)
 })
 
-test("selectSnapshotsForClient never exceeds a small limit", async () => {
-  const { selectSnapshotsForClient } = await import("./index.ts")
+test("selectSnapshotsForClient never exceeds a small limit", () => {
   const now = 1_700_000_000_000
   const history = [
     { at: now - 4 * 3_600_000, rolling: 5 },
@@ -727,8 +528,7 @@ test("selectSnapshotsForClient never exceeds a small limit", async () => {
   assert.equal(picked[picked.length - 1].at, now - 10 * 60_000)
 })
 
-test("recordUsageSnapshot records a new snapshot when the reset changes", async () => {
-  const { recordUsageSnapshot } = await import("./index.ts")
+test("recordUsageSnapshot records a new snapshot when the reset changes", () => {
   const now = 1_700_000_000_000
   const row = {
     key: "rolling" as const,
@@ -745,17 +545,28 @@ test("recordUsageSnapshot records a new snapshot when the reset changes", async 
   assert.equal(next.length, 2)
 })
 
-test("alertMessage does not claim a limited window is only at its reported percent", async () => {
-  const { alertMessage } = await import("./index.ts")
+test("emptyCard remains plain data", () => {
+  const card = emptyCard("boom")
+  assert.equal(card.ok, false)
+  assert.deepEqual(card.rows, [])
+  assert.equal(card.error, "boom")
+})
+
+test("paceSummary exposes margin and time-to-full for hot windows", () => {
+  const now = 1_700_000_000_000
+  const weekMs = 7 * 86_400_000
   const row = {
-    key: "rolling" as const,
-    label: "5h",
-    used: 42,
-    status: "limited",
-    resetsAt: "18:00",
-    resetsAtMs: NOW + 3_600_000,
-    resetsIn: "1h",
+    key: "weekly" as const,
+    label: "1w",
+    used: 70,
+    status: "ok",
+    resetsAt: "Fri",
+    resetsAtMs: now + Math.round(weekMs * 0.64),
+    resetsIn: "4d 12h",
   }
-  assert.equal(alertMessage(row, NOW, "en"), "5h limit reached (42% reported), resets: 1h 00m")
-  assert.equal(alertMessage(row, NOW, "ru"), "Лимит 5ч исчерпан (в API 42%), сброс: 1ч 00м")
+  const summary = paceSummary([row], now)
+  assert.equal(summary?.kind, "hot")
+  assert.equal(summary?.windowKey, "weekly")
+  assert.ok((summary?.timeToFullMs ?? 0) > 0)
+  assert.ok((summary?.marginMs ?? 0) >= 60_000)
 })

@@ -1,7 +1,17 @@
 import { createEffect, createSignal, For, type JSX, on, onCleanup, Show } from "solid-js"
 import { Command, Plugin, SettingsPage, Slot, Store, TitlebarItem } from "@opencode/plugin/gui"
+import { Schema } from "effect"
 import { Limits } from "./rpc.ts"
 import { GUI_I18N } from "./gui/i18n.ts"
+import {
+  ALERT_STATE_VERSION,
+  type AlertNotification,
+  type AlertState,
+  createAlertState,
+  reduceAlerts,
+} from "./ui-state/alerts.ts"
+import { createStatusPoller } from "./ui-state/poller.ts"
+import { applySharedPrefs, pickSharedPrefs } from "./ui-state/prefs.ts"
 import {
   type BarPalette,
   CONSOLE_URL,
@@ -25,49 +35,97 @@ import {
   type ZenActivityInfo,
 } from "./gui/stores.ts"
 import { LimitsStrip, MiniBar, SectionDivider, Sparkline, amberText } from "./gui/components.tsx"
+import { message } from "./i18n/index.ts"
 import {
+  type CardErrorCode,
   type LimitCard,
   type LimitRow,
   type Locale,
   type VisibleWindows,
   type WindowKey,
-  accountKey,
-  alertMessage,
-  burnSpikeMessage,
-  cardText,
-  detectBurnSpike,
-  displayPercent,
   emptyCard,
   estimateWindowPace,
-  formatTokensCompact,
-  formatUsd,
   isAuthError,
-  newAlerts,
   normalizeLocale,
   paceSummary,
-  recoveredAlerts,
-  relativeAge,
-  resetAlertMessage,
-  resetText,
   retry,
   rowWindowKey,
   selectStripRows,
-  shortDate,
-  shortErrorLabel,
   shouldHideStrip,
-  sourceLabel,
-  span,
   summarizeStatsByProvider,
   windowElapsedRatio,
-  windowLabel,
   windowVerdict,
 } from "./core/index.ts"
+import {
+  cardErrorText,
+  cardText,
+  displayPercent,
+  formatTokensCompact,
+  formatUsd,
+  paceSummaryText,
+  relativeAge,
+  resetText,
+  shortDate,
+  shortErrorLabel,
+  sourceLabel,
+  span,
+  windowLabel,
+  windowVerdictText,
+} from "./present/index.ts"
 
 type I18nKey = keyof (typeof GUI_I18N)["en"]
 
 function interpolate(template: string, vars?: Record<string, string | number>): string {
   if (!vars) return template
   return template.replace(/\{\{(\w+)\}\}/g, (_, k: string) => String(vars[k] ?? ""))
+}
+
+const AlertRecord = Schema.Struct({
+  version: Schema.Number,
+  account: Schema.String,
+  notified: Schema.Record(Schema.String, Schema.Number),
+  exhausted: Schema.Array(Schema.String),
+  risk: Schema.Record(Schema.String, Schema.String),
+  spikeAt: Schema.Number,
+  systemAt: Schema.optional(Schema.Number),
+})
+
+type AlertRecordValue = typeof AlertRecord.Type
+
+type DiagnosticsSummary = {
+  cache?: { ok?: boolean; ageMs?: number; source?: string; accountId?: string }
+  history?: { count?: number; accountId?: string }
+  prefs?: { keys?: string[] }
+  updater?: {
+    currentVersion?: string
+    latestVersion?: string
+    updateAvailable?: boolean
+    managedByDev?: boolean
+    managedByPackageManager?: boolean
+    error?: string
+  }
+  resetInMs?: number
+}
+
+const ALERT_RECORD_INITIAL: AlertRecordValue = {
+  version: ALERT_STATE_VERSION,
+  account: "",
+  notified: {},
+  exhausted: [],
+  risk: {},
+  spikeAt: 0,
+}
+
+function toAlertRecord(state: AlertState): AlertRecordValue {
+  return {
+    version: ALERT_STATE_VERSION,
+    account: state.account,
+    notified: { ...state.notified },
+    exhausted: [...state.exhausted],
+    risk: { ...state.risk },
+    spikeAt: state.spikeAt,
+    ...(state.systemAt === undefined ? {} : { systemAt: state.systemAt }),
+  }
 }
 
 export default Plugin.define({
@@ -111,6 +169,7 @@ export default Plugin.define({
       dialogSource: true,
       burnSpikePct: 20,
     }),
+    "gui.alerts": Store.global(AlertRecord, ALERT_RECORD_INITIAL),
   },
   i18n: GUI_I18N,
   setup(ctx) {
@@ -128,19 +187,11 @@ export default Plugin.define({
     const [refreshing, setRefreshing] = createSignal(false)
     const [updateInfo, setUpdateInfo] = createSignal<UpdateStatusInfo | null>(null)
     const [updateBusy, setUpdateBusy] = createSignal(false)
-    const notified = new Map<string, number>()
-    const wasExhausted = new Set<string>()
-    const riskNotified = new Map<string, string>()
+    const alertStore = ctx.stores["gui.alerts"]
+    let alertState = createAlertState(alertStore.value)
     let notifiedUpdateVersion = ""
     let lastFocusRefreshAt = 0
-    let lastSpikeAlertAt = 0
-    let lastSystemNotifyAt = 0
     let hiddenPollSkip = 0
-    let currentAccount = ""
-    let statusInflight = false
-    let requestSeq = 0
-    let statusAbort: AbortController | null = null
-    let queuedForce: boolean | null = null
     let zenSeq = 0
     let zenInflight = false
     let zenQueued = false
@@ -183,7 +234,7 @@ export default Plugin.define({
     function pushSharedPrefs(patch: Record<string, unknown>): Promise<void> {
       return ctx.client
         .rpc(Limits)
-        .setPrefs(patch, { signal: ctx.signal })
+        .setPrefs(pickSharedPrefs(patch), { signal: ctx.signal })
         .then(
           () => {},
           () => {
@@ -196,59 +247,53 @@ export default Plugin.define({
 
     async function pullSharedPrefs() {
       try {
-        const shared = (await ctx.client.rpc(Limits).getPrefs({}, { signal: ctx.signal })) as {
-          rolling?: boolean
-          weekly?: boolean
-          monthly?: boolean
-          showRemaining?: boolean
-          alerts?: boolean
-          systemNotifications?: boolean
-          warnThreshold?: number
-          burnSpikePct?: number
-          langOverride?: string
-        }
+        const shared = (await ctx.client.rpc(Limits).getPrefs({}, { signal: ctx.signal })) as Record<string, unknown>
         if (!shared || ctx.signal.aborted) return
-        if (
-          typeof shared.rolling === "boolean" ||
-          typeof shared.weekly === "boolean" ||
-          typeof shared.monthly === "boolean"
-        ) {
-          strip.update((d) => {
-            if (typeof shared.rolling === "boolean") d.show5h = shared.rolling
-            if (typeof shared.weekly === "boolean") d.show1w = shared.weekly
-            if (typeof shared.monthly === "boolean") d.show1m = shared.monthly
-          })
-        }
-        if (typeof shared.showRemaining === "boolean") {
-          display.update((d) => {
-            d.showRemaining = shared.showRemaining!
-          })
-        }
-        if (typeof shared.alerts === "boolean") {
-          prefs.update((d) => {
-            d.alerts = shared.alerts!
-          })
-        }
-        if (typeof shared.systemNotifications === "boolean") {
-          prefs.update((d) => {
-            d.systemNotifications = shared.systemNotifications!
-          })
-        }
-        if (typeof shared.warnThreshold === "number") {
-          extras.update((d) => {
-            d.warnThreshold = shared.warnThreshold!
-          })
-        }
-        if (typeof shared.burnSpikePct === "number") {
-          custom.update((d) => {
-            d.burnSpikePct = shared.burnSpikePct!
-          })
-        }
-        if (shared.langOverride === "auto" || shared.langOverride === "en" || shared.langOverride === "ru") {
-          custom.update((d) => {
-            d.langOverride = shared.langOverride as LangOverride
-          })
-        }
+        applySharedPrefs(shared, {
+          windows: (windows) => {
+            strip.update((d) => {
+              if (typeof windows.rolling === "boolean") d.show5h = windows.rolling
+              if (typeof windows.weekly === "boolean") d.show1w = windows.weekly
+              if (typeof windows.monthly === "boolean") d.show1m = windows.monthly
+            })
+          },
+          showRemaining: (value) => {
+            display.update((d) => {
+              d.showRemaining = value
+            })
+          },
+          alerts: (value) => {
+            prefs.update((d) => {
+              d.alerts = value
+            })
+          },
+          systemNotifications: (value) => {
+            prefs.update((d) => {
+              d.systemNotifications = value
+            })
+          },
+          warnThreshold: (value) => {
+            extras.update((d) => {
+              d.warnThreshold = value
+            })
+          },
+          burnSpikePct: (value) => {
+            custom.update((d) => {
+              d.burnSpikePct = value
+            })
+          },
+          langOverride: (value) => {
+            custom.update((d) => {
+              d.langOverride = value as LangOverride
+            })
+          },
+          // The server owns autoUpdate: keep the store in step instead of pushing a stale local value.
+          autoUpdate: (value) => {
+            prefs.update((d) => {
+              d.autoUpdate = value
+            })
+          },
+        })
       } catch {}
     }
 
@@ -387,17 +432,40 @@ export default Plugin.define({
       } catch {}
     }
 
-    function copyDiagnostics() {
+    async function copyDiagnostics() {
       const c = card()
       const info = updateInfo()
       const lines = [
         `opencode-limits-go v${info?.currentVersion ?? "unknown"}`,
         `managedByPackageManager: ${info?.managedByPackageManager ? "yes" : "no"}`,
         `status: ${c?.ok ? "ok" : "error"}`,
-        c?.ok ? `source: ${c.source || "unknown"}` : `error: ${c?.error || "none"}`,
+        c?.ok
+          ? `source: ${c.source || "unknown"}`
+          : `error: ${c?.errorCode ?? "none"}${cardErrorText(c, lang()) ? ` · ${cardErrorText(c, lang())}` : ""}`,
         c?.ok ? `usage: ${c.rows.map((r) => `${r.key ?? r.label}=${r.used}%`).join(", ")}` : "",
         `placement: ${prefs.value.placement} · mode: ${custom.value.stripMode} · palette: ${effectivePalette()}`,
       ].filter(Boolean)
+      try {
+        const diag = (await ctx.client
+          .rpc(Limits)
+          .diagnostics({}, { signal: ctx.signal })) as DiagnosticsSummary | null
+        if (diag && !ctx.signal.aborted) {
+          const cache = diag.cache
+          if (cache) {
+            const age = typeof cache.ageMs === "number" ? `${Math.max(0, Math.round(cache.ageMs / 1000))}s` : "?"
+            lines.push(`server cache: ${cache.ok ? "ok" : "empty"} · age ${age} · source ${cache.source || "unknown"}`)
+          }
+          const history = diag.history
+          if (history && typeof history.count === "number") lines.push(`server history: ${history.count} snapshots`)
+          const keys = diag.prefs?.keys
+          if (Array.isArray(keys)) lines.push(`server prefs: ${keys.join(", ")}`)
+          const updater = diag.updater
+          if (updater?.currentVersion) {
+            const update = updater.updateAvailable ? `update available: ${updater.latestVersion ?? "?"}` : "up to date"
+            lines.push(`server updater: ${updater.currentVersion} · ${update}`)
+          }
+        }
+      } catch {}
       void copyText(lines.join("\n"))
     }
 
@@ -408,7 +476,8 @@ export default Plugin.define({
       const l = lang()
       const base = t("command.limits")
       if (!c?.ok) {
-        return c?.error ? `${base}\n${c.error}` : base
+        const error = cardErrorText(c, l)
+        return error ? `${base}\n${error}` : base
       }
       const now = Date.now()
       const rem = display.value.showRemaining
@@ -419,11 +488,11 @@ export default Plugin.define({
           return `${windowLabel(r, l)} ${pct}%${rem ? ` ${t("limits.left")}` : ""} (${rs.text})`
         })
         .join(" · ")
-      const pace = paceSummary(c.rows, now, l, c.snapshots)
+      const pace = paceSummary(c.rows, now, c.snapshots)
       const risk = c.rows
-        .map((row) => windowVerdict(row, now, l, c.snapshots))
+        .map((row) => windowVerdict(row, now, c.snapshots))
         .filter((v): v is NonNullable<typeof v> => v !== null && v.kind !== "fits")
-        .map((v) => v.text)
+        .map((v) => windowVerdictText(v, l))
       const z = extras.value.showZenStats ? zenActivity() : null
       const zenLine =
         z && z.today.zenCostUsd > 0
@@ -432,7 +501,7 @@ export default Plugin.define({
             ? `${t("limits.todayGo")}: ${formatTokensCompact(z.today.goTokens)}`
             : ""
       const stale = staleError() ? t("limits.stale", { error: staleError() }) : ""
-      return [base, rowsText, ...risk, pace?.text, zenLine, stale].filter(Boolean).join("\n")
+      return [base, rowsText, ...risk, pace ? paceSummaryText(pace, l) : "", zenLine, stale].filter(Boolean).join("\n")
     }
 
     const placementOptions = () => [
@@ -524,104 +593,90 @@ export default Plugin.define({
       }
     }
 
-    function notify(title: string, variant: "default" | "success" | "error"): void {
-      ctx.toast.show({ variant, title })
-      // OS notifications are opt-in and only for 100% quota, at most once per 10 minutes.
-      if (prefs.value.systemNotifications !== true || variant !== "error") return
-      const now = Date.now()
-      if (now - lastSystemNotifyAt < 10 * 60_000) return
-      lastSystemNotifyAt = now
-      const pending = ctx.attention?.notify({ title, variant: "error" })
+    function persistAlerts(next: AlertState): void {
+      const changed = JSON.stringify(next) !== JSON.stringify(alertState)
+      alertState = next
+      if (changed) alertStore.set(toAlertRecord(next))
+    }
+
+    function resetAlerts(): void {
+      alertState = createAlertState()
+      alertStore.set(toAlertRecord(alertState))
+    }
+
+    function showNotification(notification: AlertNotification): void {
+      const variant = notification.variant === "warning" ? "default" : notification.variant
+      ctx.toast.show({ variant, title: notification.text })
+      // The reducer owns opt-in, 100%-only, and the 10-minute throttle for system notifications.
+      if (!notification.attention) return
+      const pending = ctx.attention?.notify({ title: notification.text, variant: "error" })
       void pending?.catch(() => {})
     }
 
-    async function refresh(force = false): Promise<LimitCard | null> {
-      if (ctx.signal.aborted) return null
-      if (statusInflight) {
-        queuedForce = queuedForce === true || force
-        return card()
+    function applyAlerts(result: LimitCard): void {
+      const reduced = reduceAlerts(
+        alertState,
+        result,
+        {
+          alerts: prefs.value.alerts,
+          warnThreshold: extras.value.warnThreshold,
+          burnSpikePct: custom.value.burnSpikePct,
+          systemNotifications: prefs.value.systemNotifications === true,
+          lang: lang(),
+        },
+        Date.now(),
+      )
+      persistAlerts(reduced.state)
+      for (const notification of reduced.notifications) showNotification(notification)
+    }
+
+    function handleResult(result: LimitCard, meta: { force: boolean }): void {
+      if (ctx.signal.aborted) return
+      setReady(true)
+      if (meta.force) setRefreshing(false)
+      if (result.ok) {
+        setCard(result)
+        if (!result.stale) setStaleError("")
+        void loadZenActivity()
+        applyAlerts(result)
+        return
       }
-      statusInflight = true
-      const seq = requestSeq
-      const ctrl = new AbortController()
-      statusAbort = ctrl
-      if (force) setRefreshing(true)
-      try {
-        const currentLang = lang()
-        const maxAgeMs = extras.value.pollSeconds * 1000
-        const signal = AbortSignal.any([ctx.signal, ctrl.signal, AbortSignal.timeout(30_000)])
-        const result = (await ctx.client
-          .rpc(Limits)
-          .status({ force, lang: currentLang, maxAgeMs }, { signal })) as LimitCard
-        if (ctx.signal.aborted || seq !== requestSeq) return null
-        setReady(true)
-        if (result.ok) {
-          setCard(result)
-          if (!result.stale) setStaleError("")
-          void loadZenActivity()
-          const now = Date.now()
-          const acct = accountKey(result.org, result.email, result.source)
-          const changedAccount = !!currentAccount && currentAccount !== acct
-          if (changedAccount) {
-            notified.clear()
-            wasExhausted.clear()
-            riskNotified.clear()
-            lastSpikeAlertAt = 0
-            lastSystemNotifyAt = 0
-          }
-          currentAccount = acct
-          if (prefs.value.alerts && !result.stale) {
-            const triggered = newAlerts(result.rows, notified, extras.value.warnThreshold)
-            const recovered = recoveredAlerts(result.rows, wasExhausted)
-            for (const row of triggered) {
-              notify(alertMessage(row, now, currentLang), row.used >= 100 ? "error" : "default")
-            }
-            for (const row of recovered) {
-              notify(resetAlertMessage(row, currentLang), "success")
-            }
-            for (const row of result.rows) {
-              const verdict = windowVerdict(row, now, currentLang, result.snapshots)
-              if (!verdict || verdict.kind !== "tight") continue
-              const id = row.key ?? row.label
-              const signature = String(row.resetsAtMs ?? 0)
-              if (riskNotified.get(id) === signature) continue
-              riskNotified.set(id, signature)
-              notify(verdict.text, "default")
-            }
-            if (custom.value.burnSpikePct > 0 && now - lastSpikeAlertAt > 30 * 60_000) {
-              const spike = detectBurnSpike(result.rows, result.snapshots, custom.value.burnSpikePct, now)
-              if (spike) {
-                lastSpikeAlertAt = now
-                notify(burnSpikeMessage(spike, currentLang), "default")
-              }
-            }
-          }
-        } else if (card()?.ok) {
-          setStaleError(result.error || t("limits.failed"))
-        } else {
-          setCard(result)
-          setStaleError("")
-        }
-        return result
-      } catch {
-        if (ctx.signal.aborted || seq !== requestSeq) return null
-        setReady(true)
-        if (card()?.ok) {
-          setStaleError(t("limits.noServer"))
-        } else {
-          setCard(emptyCard(t("limits.noServer")))
-        }
-        return null
-      } finally {
-        if (statusAbort === ctrl) statusAbort = null
-        statusInflight = false
-        if (force && !ctx.signal.aborted) setRefreshing(false)
-        if (!ctx.signal.aborted) {
-          const next = queuedForce
-          queuedForce = null
-          if (next !== null) void refresh(next)
-        }
+      if (card()?.ok) {
+        setStaleError(cardErrorText(result, lang()) || t("limits.failed"))
+        return
       }
+      setCard(result)
+      setStaleError("")
+    }
+
+    function handleError(): void {
+      if (ctx.signal.aborted) return
+      setReady(true)
+      setRefreshing(false)
+      if (card()?.ok) {
+        setStaleError(t("limits.noServer"))
+      } else {
+        setCard(emptyCard(t("limits.noServer")))
+      }
+    }
+
+    const poller = createStatusPoller({
+      fetchStatus: ({ force, signal }) =>
+        ctx.client.rpc(Limits).status(
+          { force, lang: lang(), maxAgeMs: extras.value.pollSeconds * 1000 },
+          { signal: AbortSignal.any([signal, ctx.signal]) },
+        ) as Promise<LimitCard>,
+      onStart: (meta) => {
+        if (meta.force) setRefreshing(true)
+      },
+      onResult: handleResult,
+      onError: () => handleError(),
+    })
+    onCleanup(() => poller.dispose())
+
+    function refresh(force = false): Promise<LimitCard | null> {
+      if (ctx.signal.aborted) return Promise.resolve(null)
+      return poller.refresh(force)
     }
 
     async function syncAutoUpdate(enabled: boolean, previous: boolean): Promise<void> {
@@ -693,7 +748,6 @@ export default Plugin.define({
     void retry(() => refresh(), (r) => r !== null, 5, undefined, ctx.signal).then(() => {
       if (ctx.signal.aborted) return
       void pullSharedPrefs()
-      void syncAutoUpdate(prefs.value.autoUpdate, prefs.value.autoUpdate)
       void checkUpdates(false)
     })
 
@@ -751,18 +805,12 @@ export default Plugin.define({
             void refresh()
             return
           }
-          requestSeq += 1
-          statusAbort?.abort()
+          poller.invalidate()
           setCard(null)
           setStaleError("")
           setZenActivity(null)
           zenSeq += 1
-          currentAccount = ""
-          notified.clear()
-          wasExhausted.clear()
-          riskNotified.clear()
-          lastSpikeAlertAt = 0
-          lastSystemNotifyAt = 0
+          resetAlerts()
           void refresh(true)
         },
         { signal: ctx.signal },
@@ -1581,9 +1629,10 @@ export default Plugin.define({
       ))
     }
 
-    function openErrorDialog(errorMsg: string) {
+    function openErrorDialog(errorMsg: string, errorCode?: CardErrorCode) {
       ctx.dialogs.open((dialog) => {
         const [err, setErr] = createSignal(errorMsg)
+        const [errCode, setErrCode] = createSignal<CardErrorCode | undefined>(errorCode)
         let closed = false
         const closeDialog = () => {
           closed = true
@@ -1599,10 +1648,13 @@ export default Plugin.define({
             closeDialog()
             openCard(next)
           } else {
-            setErr(next?.error || t("limits.failed"))
+            setErr(cardErrorText(next, lang()) || t("limits.failed"))
+            setErrCode(next?.errorCode)
           }
         }
         const showAuthHint = () => {
+          const code = errCode()
+          if (code === "AUTH" || code === "NO_TOKEN") return true
           const raw = err().toLowerCase()
           return isAuthError(raw) || raw.includes("no_token") || raw.includes("no token") || raw.includes("нет токена")
         }
@@ -1691,7 +1743,7 @@ export default Plugin.define({
           // A failed refresh is shown by the stale banner; a second toast would duplicate it.
         }
 
-        const pace = () => paceSummary(current().rows, now(), lang(), current().snapshots)
+        const pace = () => paceSummary(current().rows, now(), current().snapshots)
         const hasExhausted = () => current().rows.some((r) => r.used >= 100 || r.status === "limited")
         const paceCardStyle = () => {
           const k = pace()?.kind
@@ -1804,8 +1856,8 @@ export default Plugin.define({
                       ? `${t("limits.reset")} ${dateStr} · ${r.text}`
                       : `${t("limits.reset")} ${dateStr} · ${t("limits.in")} ${r.text}`
                   }
-                  const rowPace = () => estimateWindowPace(row, now(), lang(), current().snapshots)
-                  const verdict = () => windowVerdict(row, now(), lang(), current().snapshots)
+                  const rowPace = () => estimateWindowPace(row, now(), current().snapshots)
+                  const verdict = () => windowVerdict(row, now(), current().snapshots)
                   const elapsed = () => windowElapsedRatio(row, now())
                   const deltaTooltip = () =>
                     row.deltaSpanMs && row.deltaSpanMs > 0
@@ -1845,7 +1897,7 @@ export default Plugin.define({
                       <span style="opacity:.7;font-size:11px;min-width:0;flex:1;">
                         {resetLine()}
                         {row.status === "limited" ? ` · ${t("limits.limited")}` : row.status !== "ok" ? ` · ${row.status}` : ""}
-                        {verdict() && verdict()!.kind !== "fits" ? ` · ${verdict()!.text}` : ""}
+                        {verdict() && verdict()!.kind !== "fits" ? ` · ${windowVerdictText(verdict()!, lang())}` : ""}
                       </span>
                       <Show when={row.delta1h && row.delta1h > 0}>
                         <ui.Tooltip value={deltaTooltip()}>
@@ -1875,7 +1927,7 @@ export default Plugin.define({
               </For>
               <Show when={custom.value.dialogPace && pace()}>
                 <div style={paceCardStyle()}>
-                  {pace()!.text}
+                  {pace() ? paceSummaryText(pace()!, lang()) : ""}
                   <Show when={showZenLeft()}> · {zenLeft()}</Show>
                   <div style="opacity:.7;margin-top:3px;">{t("limits.paceExplain")}</div>
                 </div>
@@ -2005,7 +2057,7 @@ export default Plugin.define({
           openCard(card()!)
           return
         }
-        openErrorDialog(result?.error ?? t("limits.failed"))
+        openErrorDialog(cardErrorText(result, lang()) || t("limits.failed"), result?.errorCode)
         return
       }
       openCard(result)
@@ -2339,10 +2391,10 @@ export default Plugin.define({
               return strip.value.showLabels ? `${windowLabel(r, l)} ${pct}%` : `${pct}%`
             })
             .join(" · ")
-        : `${l === "ru" ? "лимиты" : "limits"}: ${ready() ? shortErrorLabel(current?.error, l) : "…"}`
+        : `${message(l, "card.limits")}: ${ready() ? shortErrorLabel(cardErrorText(current, l), l) : "…"}`
       const fullTitle = current?.ok
         ? `${t("command.limits")}: ${cardText(current, l)}`
-        : `${t("command.limits")}: ${current?.error || label}`
+        : `${t("command.limits")}: ${cardErrorText(current, l) || label}`
       return {
         id: "limits",
         label,

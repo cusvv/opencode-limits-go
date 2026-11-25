@@ -75,16 +75,3 @@ export function summarizeStatsByProvider(models: readonly ModelUsageLike[] | und
     .slice(0, 3)
   return out
 }
-
-export function formatTokensCompact(count: number): string {
-  if (!Number.isFinite(count) || count <= 0) return "0"
-  if (count >= 999_950) return `${(count / 1_000_000).toFixed(1)}M`
-  if (count >= 1_000) return `${Math.round(count / 1_000)}k`
-  return String(Math.round(count))
-}
-
-export function formatUsd(usd: number): string {
-  if (!Number.isFinite(usd) || usd <= 0) return "$0.00"
-  if (usd < 0.01) return `$${usd.toFixed(4)}`
-  return `$${usd.toFixed(2)}`
-}

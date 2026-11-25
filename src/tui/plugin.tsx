@@ -1,33 +1,29 @@
 import { Plugin } from "@opencode/plugin/tui"
 import { Show, createSignal } from "solid-js"
 import { Limits } from "../rpc.ts"
-import { log } from "../server/log.ts"
 import { TUI_COPY as COPY } from "./i18n.ts"
+import { type AlertNotification, type AlertState, createAlertState, reduceAlerts } from "../ui-state/alerts.ts"
+import { createStatusPoller } from "../ui-state/poller.ts"
+import { applySharedPrefs, pickSharedPrefs } from "../ui-state/prefs.ts"
 import {
   type LimitCard,
   type Locale,
   type VisibleWindows,
-  accountKey,
-  alertMessage,
-  burnSpikeMessage,
-  cardDetail,
-  detectBurnSpike,
   emptyCard,
-  errorText,
   filterStripRows,
+  normalizeLocale,
+  retry,
+  summarizeStatsByProvider,
+} from "../core/index.ts"
+import {
+  cardDetail,
+  cardErrorText,
   formatTokensCompact,
   formatTuiSidebar,
   formatUsd,
-  newAlerts,
-  normalizeLocale,
-  recoveredAlerts,
   relativeAge,
-  resetAlertMessage,
-  retry,
   span,
-  summarizeStatsByProvider,
-  windowVerdict,
-} from "../core/index.ts"
+} from "../present/index.ts"
 
 type TuiPrefs = VisibleWindows & {
   showBars?: boolean
@@ -39,14 +35,6 @@ type TuiPrefs = VisibleWindows & {
   systemNotifications?: boolean
   hidden?: boolean
   plain?: boolean
-}
-
-type TuiAlertState = {
-  account: string
-  notified: Record<string, number>
-  exhausted: string[]
-  risk: Record<string, string>
-  spikeAt: number
 }
 
 export default Plugin.define({
@@ -74,8 +62,8 @@ export default Plugin.define({
         plain: false,
       },
     })
-    const [alertState, setAlertState] = ctx.storage.store<TuiAlertState>("opencode-limits-go.tui.alerts", {
-      initial: { account: "", notified: {}, exhausted: [], risk: {}, spikeAt: 0 },
+    const [alertState, setAlertState] = ctx.storage.store<AlertState>("opencode-limits-go.tui.alerts", {
+      initial: createAlertState(),
     })
 
     const lang = (): Locale =>
@@ -96,22 +84,15 @@ export default Plugin.define({
     const onResize = (width: number) => setTermWidth(width)
     renderer?.on("resize", onResize)
     let notifiedVersion = ""
-    let lastSystemNotifyAt = 0
-    let refreshing = false
-    let requestSeq = 0
-    let statusAbort: AbortController | null = null
-    let queuedForce: boolean | null = null
 
-    function notify(message: string, variant: "info" | "warning" | "error"): void {
-      ctx.ui.toast.show({ message, variant })
-      // OS notifications are opt-in and only for 100% quota, at most once per 10 minutes.
-      if (tuiPrefs.systemNotifications !== true || variant !== "error") return
-      const now = Date.now()
-      if (now - lastSystemNotifyAt < 10 * 60_000) return
-      lastSystemNotifyAt = now
+    function showAlert(notification: AlertNotification): void {
+      const variant = notification.variant === "error" ? "error" : notification.variant === "success" ? "info" : "warning"
+      ctx.ui.toast.show({ message: notification.text, variant })
+      // The reducer owns opt-in, 100%-only, and the 10-minute throttle for system notifications.
+      if (!notification.attention) return
       const pending = ctx.attention?.notify({
         title: copy().title,
-        message,
+        message: notification.text,
         notification: { when: "blurred" },
         sound: { when: "blurred" },
       })
@@ -120,126 +101,127 @@ export default Plugin.define({
 
     async function pullSharedPrefs() {
       try {
-        const shared = (await ctx.client.rpc(Limits).getPrefs({}, { signal: stopCtrl.signal })) as Partial<TuiPrefs>
+        const shared = (await ctx.client.rpc(Limits).getPrefs({}, { signal: stopCtrl.signal })) as Record<
+          string,
+          unknown
+        >
         if (!shared || stopCtrl.signal.aborted) return
         await setTuiPrefs((d) => {
-          if (typeof shared.rolling === "boolean") d.rolling = shared.rolling
-          if (typeof shared.weekly === "boolean") d.weekly = shared.weekly
-          if (typeof shared.monthly === "boolean") d.monthly = shared.monthly
-          if (typeof shared.showRemaining === "boolean") d.showRemaining = shared.showRemaining
-          if (typeof shared.warnThreshold === "number") d.warnThreshold = shared.warnThreshold
-          if (typeof shared.burnSpikePct === "number") d.burnSpikePct = shared.burnSpikePct
-          if (typeof shared.alerts === "boolean") d.alerts = shared.alerts
-          if (typeof shared.systemNotifications === "boolean") d.systemNotifications = shared.systemNotifications
-          if (shared.langOverride === "auto" || shared.langOverride === "en" || shared.langOverride === "ru") {
-            d.langOverride = shared.langOverride
-          }
+          applySharedPrefs(shared, {
+            windows: (windows) => {
+              if (typeof windows.rolling === "boolean") d.rolling = windows.rolling
+              if (typeof windows.weekly === "boolean") d.weekly = windows.weekly
+              if (typeof windows.monthly === "boolean") d.monthly = windows.monthly
+            },
+            showRemaining: (value) => {
+              d.showRemaining = value
+            },
+            warnThreshold: (value) => {
+              d.warnThreshold = value
+            },
+            burnSpikePct: (value) => {
+              d.burnSpikePct = value
+            },
+            alerts: (value) => {
+              d.alerts = value
+            },
+            systemNotifications: (value) => {
+              d.systemNotifications = value
+            },
+            langOverride: (value) => {
+              d.langOverride = value
+            },
+          })
         })
       } catch {}
     }
 
     function pushSharedPrefs(patch: Partial<TuiPrefs>) {
-      void ctx.client.rpc(Limits).setPrefs(patch, { signal: stopCtrl.signal }).catch(() => {
+      void ctx.client.rpc(Limits).setPrefs({ ...pickSharedPrefs({ ...patch }) }, { signal: stopCtrl.signal }).catch(() => {
         ctx.ui.toast.show({ message: copy().noServer, variant: "error" })
         void pullSharedPrefs()
       })
     }
 
     function applyAlerts(result: LimitCard, now: number): void {
-      if (!result.ok || result.stale || !alertsOn() || stopCtrl.signal.aborted) return
-      const acct = accountKey(result.org, result.email, result.source)
-      const changedAccount = !!alertState.account && alertState.account !== acct
-      const notified = new Map<string, number>(changedAccount ? [] : Object.entries(alertState.notified))
-      const wasExhausted = new Set<string>(changedAccount ? [] : alertState.exhausted)
-      const risk = { ...(changedAccount ? {} : alertState.risk) }
-      let lastSpikeAlertAt = changedAccount || !Number.isFinite(alertState.spikeAt) ? 0 : alertState.spikeAt
-      if (changedAccount) lastSystemNotifyAt = 0
-
-      const triggered = newAlerts(result.rows, notified, warnAt())
-      const recovered = recoveredAlerts(result.rows, wasExhausted)
-      for (const row of triggered) notify(alertMessage(row, now, lang()), row.used >= 100 ? "error" : "warning")
-      for (const row of recovered) notify(resetAlertMessage(row, lang()), "info")
-
-      for (const row of result.rows) {
-        const verdict = windowVerdict(row, now, lang(), result.snapshots)
-        if (!verdict || verdict.kind !== "tight") continue
-        const id = row.key ?? row.label
-        const signature = String(row.resetsAtMs ?? 0)
-        if (risk[id] === signature) continue
-        risk[id] = signature
-        notify(verdict.text, "warning")
-      }
-
-      if (spikeAt() > 0 && now - lastSpikeAlertAt > 30 * 60_000) {
-        const spike = detectBurnSpike(result.rows, result.snapshots, spikeAt(), now)
-        if (spike) {
-          lastSpikeAlertAt = now
-          notify(burnSpikeMessage(spike, lang()), "warning")
-        }
-      }
-
-      const nextState: TuiAlertState = {
-        account: acct,
-        notified: Object.fromEntries(notified),
-        exhausted: [...wasExhausted],
-        risk,
-        spikeAt: lastSpikeAlertAt,
-      }
-      if (JSON.stringify(nextState) !== JSON.stringify(alertState)) {
+      if (stopCtrl.signal.aborted) return
+      const current = createAlertState(alertState)
+      const reduced = reduceAlerts(
+        current,
+        result,
+        {
+          alerts: alertsOn(),
+          warnThreshold: warnAt(),
+          burnSpikePct: spikeAt(),
+          systemNotifications: tuiPrefs.systemNotifications === true,
+          lang: lang(),
+        },
+        now,
+      )
+      if (JSON.stringify(reduced.state) !== JSON.stringify(current)) {
+        const next = reduced.state
         void setAlertState((draft) => {
-          draft.account = nextState.account
-          draft.notified = nextState.notified
-          draft.exhausted = nextState.exhausted
-          draft.risk = nextState.risk
-          draft.spikeAt = nextState.spikeAt
+          draft.account = next.account
+          draft.notified = next.notified
+          draft.exhausted = next.exhausted
+          draft.risk = next.risk
+          draft.spikeAt = next.spikeAt
+          draft.systemAt = next.systemAt
         })
+      }
+      for (const notification of reduced.notifications) showAlert(notification)
+    }
+
+    function resetAlerts(): void {
+      const cleared = createAlertState()
+      void setAlertState((draft) => {
+        draft.account = cleared.account
+        draft.notified = cleared.notified
+        draft.exhausted = cleared.exhausted
+        draft.risk = cleared.risk
+        draft.spikeAt = cleared.spikeAt
+        draft.systemAt = cleared.systemAt
+      })
+    }
+
+    function handleResult(result: LimitCard): void {
+      if (stopCtrl.signal.aborted) return
+      if (result.ok) {
+        setCard(result)
+        setStaleError("")
+        applyAlerts(result, Date.now())
+        return
+      }
+      if (card()?.ok) {
+        setStaleError(cardErrorText(result, lang()) || copy().failed)
+        return
+      }
+      setCard(result)
+      setStaleError("")
+    }
+
+    function handleError(): void {
+      if (stopCtrl.signal.aborted) return
+      if (card()?.ok) {
+        setStaleError(copy().noServer)
+      } else {
+        setCard(emptyCard(copy().noServer))
       }
     }
 
-    async function refresh(force = false): Promise<LimitCard | null> {
-      if (stopCtrl.signal.aborted) return null
-      if (refreshing) {
-        queuedForce = queuedForce === true || force
-        return card()
-      }
-      refreshing = true
-      const seq = requestSeq
-      const ctrl = new AbortController()
-      statusAbort = ctrl
-      try {
-        const currentLang = lang()
-        const signal = AbortSignal.any([stopCtrl.signal, ctrl.signal, AbortSignal.timeout(30_000)])
-        const result = (await ctx.client.rpc(Limits).status({ force, lang: currentLang }, { signal })) as LimitCard
-        if (stopCtrl.signal.aborted || seq !== requestSeq) return null
-        if (result.ok) {
-          setCard(result)
-          setStaleError("")
-          applyAlerts(result, Date.now())
-        } else if (card()?.ok) {
-          setStaleError(result.error || copy().failed)
-        } else {
-          setCard(result)
-          setStaleError("")
-        }
-        return result
-      } catch (error) {
-        if (stopCtrl.signal.aborted || seq !== requestSeq) return null
-        log("tui status failed", { error: errorText(error, "en") })
-        if (card()?.ok) {
-          setStaleError(copy().noServer)
-        } else {
-          setCard(emptyCard(copy().noServer))
-        }
-        return null
-      } finally {
-        if (statusAbort === ctrl) statusAbort = null
-        refreshing = false
-        if (!stopCtrl.signal.aborted) {
-          const next = queuedForce
-          queuedForce = null
-          if (next !== null) void refresh(next)
-        }
-      }
+    const poller = createStatusPoller({
+      fetchStatus: ({ force, signal }) =>
+        ctx.client.rpc(Limits).status(
+          { force, lang: lang() },
+          { signal: AbortSignal.any([signal, stopCtrl.signal]) },
+        ) as Promise<LimitCard>,
+      onResult: handleResult,
+      onError: () => handleError(),
+    })
+
+    function refresh(force = false): Promise<LimitCard | null> {
+      if (stopCtrl.signal.aborted) return Promise.resolve(null)
+      return poller.refresh(force)
     }
 
     async function fetchExtraLines(now: number): Promise<string[]> {
@@ -438,10 +420,6 @@ export default Plugin.define({
       ),
     })
 
-    const stopUsage = ctx.data.on("session.usage.updated", () => {
-      void refresh()
-    })
-
     let stopChanged: (() => void) | undefined
     let stopUpdated: (() => void) | undefined
     let stopPrefsChanged: (() => void) | undefined
@@ -462,18 +440,10 @@ export default Plugin.define({
             void refresh()
             return
           }
-          requestSeq += 1
-          statusAbort?.abort()
+          poller.invalidate()
           setCard(null)
           setStaleError("")
-          lastSystemNotifyAt = 0
-          void setAlertState((draft) => {
-            draft.account = ""
-            draft.notified = {}
-            draft.exhausted = []
-            draft.risk = {}
-            draft.spikeAt = 0
-          })
+          resetAlerts()
           void refresh(true)
         },
         { signal: stopCtrl.signal },
@@ -491,7 +461,8 @@ export default Plugin.define({
       )
     } catch {}
 
-    ctx.keymap.layer(() => ({
+    // The typed API returns void; keep any runtime disposer the host hands back.
+    const disposeKeymap: unknown = ctx.keymap.layer(() => ({
       mode: "global",
       commands: [
         {
@@ -515,7 +486,7 @@ export default Plugin.define({
                     cached,
                     now,
                     l,
-                    [result?.error ?? c.failed],
+                    [result ? cardErrorText(result, l) || c.failed : c.failed],
                     showRemaining(),
                     termWidth() < 76,
                     tuiPrefs.plain === true,
@@ -523,7 +494,7 @@ export default Plugin.define({
                 })
                 return
               }
-              ctx.ui.toast.show({ message: result?.error ?? c.failed, variant: "error" })
+              ctx.ui.toast.show({ message: result ? cardErrorText(result, l) || c.failed : c.failed, variant: "error" })
               return
             }
             const extra = await fetchExtraLines(now)
@@ -643,13 +614,14 @@ export default Plugin.define({
     }))
 
     return () => {
+      poller.dispose()
       stopCtrl.abort()
       renderer?.off("resize", onResize)
       if (timer) clearTimeout(timer)
       stopChanged?.()
       stopPrefsChanged?.()
       stopUpdated?.()
-      stopUsage()
+      if (typeof disposeKeymap === "function") disposeKeymap()
       unslot()
     }
   },

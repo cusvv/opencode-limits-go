@@ -1,14 +1,11 @@
 import {
   type LimitRow,
-  type Locale,
   type UsageSnapshot,
   type WindowKey,
+  WINDOW_BY_KEY,
   WINDOW_DURATION_MS,
   rowWindowKey,
-  windowElapsedRatio,
-  windowLabel,
 } from "./types.ts"
-import { span } from "./format.ts"
 
 export type PaceKind = "none" | "steady" | "hot" | "exhausted"
 
@@ -143,7 +140,6 @@ export function attachHistoryDeltas(
 export function estimateWindowPace(
   row: LimitRow,
   now = Date.now(),
-  lang: Locale = "en",
   history?: readonly UsageSnapshot[],
 ): WindowPace | null {
   const key = rowWindowKey(row)
@@ -153,7 +149,7 @@ export function estimateWindowPace(
   const remainingMs = resetsAtMs - now
   if (remainingMs <= 0) return null
 
-  const label = windowLabel(row, lang)
+  const label = WINDOW_BY_KEY.get(key)?.label ?? row.label
   const durationMs = WINDOW_DURATION_MS[key]
   const elapsedMs = Math.max(0, durationMs - remainingMs)
   const elapsedRatio = Math.min(1, Math.max(0, elapsedMs / durationMs))
@@ -227,61 +223,63 @@ export type WindowVerdictKind = "exhausted" | "tight" | "fits"
 
 export type WindowVerdict = {
   kind: WindowVerdictKind
-  text: string
+  labelKey: WindowKey
+  projectedPct: number
   timeToFullMs?: number
   remainingMs: number
 }
 
-// One sentence per window for the daily decision: wait, slow down, or keep going.
+// One decision per window: wait, slow down, or keep going. Text lives in present/alerts.
 export function windowVerdict(
   row: LimitRow,
   now = Date.now(),
-  lang: Locale = "en",
   history?: readonly UsageSnapshot[],
 ): WindowVerdict | null {
-  const pace = estimateWindowPace(row, now, lang, history)
+  const pace = estimateWindowPace(row, now, history)
   if (!pace) return null
   if (pace.kind === "exhausted") {
     return {
       kind: "exhausted",
+      labelKey: pace.key,
+      projectedPct: pace.projectedPct,
       remainingMs: pace.remainingMs,
-      text:
-        lang === "ru"
-          ? `${pace.label}: лимит исчерпан, сброс через ${span(pace.remainingMs, lang)}`
-          : `${pace.label}: limit reached, resets in ${span(pace.remainingMs, lang)}`,
     }
   }
   if (pace.timeToFullMs < pace.remainingMs) {
     return {
       kind: "tight",
+      labelKey: pace.key,
+      projectedPct: pace.projectedPct,
       timeToFullMs: pace.timeToFullMs,
       remainingMs: pace.remainingMs,
-      text:
-        lang === "ru"
-          ? `${pace.label}: ~${span(pace.timeToFullMs, lang)} до 100%, сброс через ${span(pace.remainingMs, lang)}`
-          : `${pace.label}: ~${span(pace.timeToFullMs, lang)} to 100%, resets in ${span(pace.remainingMs, lang)}`,
     }
   }
-  const projected = Math.min(100, Math.max(0, pace.projectedPct))
   return {
     kind: "fits",
+    labelKey: pace.key,
+    projectedPct: pace.projectedPct,
     timeToFullMs: pace.timeToFullMs,
     remainingMs: pace.remainingMs,
-    text:
-      lang === "ru"
-        ? `${pace.label}: доживёт до сброса (~${projected}% к сбросу)`
-        : `${pace.label}: holds until reset (~${projected}% by reset)`,
   }
+}
+
+export type PaceSummary = {
+  kind: Exclude<PaceKind, "none">
+  windowKey?: WindowKey
+  timeToFullMs?: number
+  remainingMs?: number
+  marginMs?: number
+  projectedPct: number
+  rate: number
 }
 
 export function paceSummary(
   rows: LimitRow[],
   now = Date.now(),
-  lang: Locale = "en",
   history?: readonly UsageSnapshot[],
-): { kind: Exclude<PaceKind, "none">; text: string } | null {
+): PaceSummary | null {
   const paces = rows
-    .map((row) => estimateWindowPace(row, now, lang, history))
+    .map((row) => estimateWindowPace(row, now, history))
     .filter((p): p is WindowPace => p !== null)
   if (!paces.length) return null
 
@@ -289,10 +287,10 @@ export function paceSummary(
   if (exhausted) {
     return {
       kind: "exhausted",
-      text:
-        lang === "ru"
-          ? `Лимит ${exhausted.label} исчерпан — сброс через ${span(exhausted.remainingMs, lang)}`
-          : `${exhausted.label} limit reached — resets in ${span(exhausted.remainingMs, lang)}`,
+      windowKey: exhausted.key,
+      remainingMs: exhausted.remainingMs,
+      projectedPct: exhausted.projectedPct,
+      rate: exhausted.rate,
     }
   }
 
@@ -300,13 +298,14 @@ export function paceSummary(
     .filter((p) => p.kind === "hot")
     .sort((a, b) => a.timeToFullMs - b.timeToFullMs)[0]
   if (hot) {
-    const marginMs = Math.max(60_000, hot.remainingMs - hot.timeToFullMs)
     return {
       kind: "hot",
-      text:
-        lang === "ru"
-          ? `Темп (${hot.label}): хватит на ~${span(hot.timeToFullMs, lang)} (за ${span(marginMs, lang)} до сброса)`
-          : `Pace (${hot.label}): ~${span(hot.timeToFullMs, lang)} until 100% (${span(marginMs, lang)} before reset)`,
+      windowKey: hot.key,
+      timeToFullMs: hot.timeToFullMs,
+      remainingMs: hot.remainingMs,
+      marginMs: Math.max(60_000, hot.remainingMs - hot.timeToFullMs),
+      projectedPct: hot.projectedPct,
+      rate: hot.rate,
     }
   }
 
@@ -314,29 +313,26 @@ export function paceSummary(
   if (steady.rate <= 0.85) {
     return {
       kind: "steady",
-      text:
-        lang === "ru"
-          ? `Темп (${steady.label}): спокойный (~${steady.projectedPct}% к сбросу)`
-          : `Pace (${steady.label}): comfortable (~${steady.projectedPct}% by reset)`,
+      windowKey: steady.key,
+      projectedPct: steady.projectedPct,
+      rate: steady.rate,
     }
   }
 
   if (steady.projectedPct >= 100) {
     return {
       kind: "hot",
-      text:
-        lang === "ru"
-          ? `Темп (${steady.label}): к сбросу ожидается ~${steady.projectedPct}% — лимит может кончиться`
-          : `Pace (${steady.label}): projected ~${steady.projectedPct}% by reset — the limit may run out`,
+      windowKey: steady.key,
+      projectedPct: steady.projectedPct,
+      rate: steady.rate,
     }
   }
 
   return {
     kind: "steady",
-    text:
-      lang === "ru"
-        ? `Темп (${steady.label}): ровный (~${steady.projectedPct}% к сбросу)`
-        : `Pace (${steady.label}): steady (~${steady.projectedPct}% by reset)`,
+    windowKey: steady.key,
+    projectedPct: steady.projectedPct,
+    rate: steady.rate,
   }
 }
 

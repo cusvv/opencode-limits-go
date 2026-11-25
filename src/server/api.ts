@@ -1,4 +1,5 @@
 import { CodedError, redactSecrets } from "../core/index.ts"
+import { anySignal } from "./platform.ts"
 
 const ENDPOINT = "https://opencode.ai/zen/go/v1/usage"
 
@@ -76,7 +77,7 @@ function pause(ms: number, signal?: AbortSignal): Promise<void> {
 
 export async function fetchUsageOnce(access: string, timeoutMs = 10_000, parentSignal?: AbortSignal): Promise<unknown> {
   const timeout = AbortSignal.timeout(Math.max(200, timeoutMs))
-  const signal = parentSignal ? AbortSignal.any([timeout, parentSignal]) : timeout
+  const signal = parentSignal ? anySignal([timeout, parentSignal]) : timeout
   const res = await fetch(ENDPOINT, {
     headers: { Authorization: `Bearer ${access}` },
     signal,

@@ -33,7 +33,22 @@ export type LimitCard = {
   error: string
   stale?: boolean
   snapshots?: UsageSnapshot[]
+  /** Stable HMAC fingerprint of the credential; safe to show, never the credential itself. */
+  accountId?: string
+  /** Credential epoch the card belongs to. */
+  revision?: number
+  errorCode?: CardErrorCode
+  errorDetail?: string
 }
+
+export type CardErrorCode =
+  | "NO_TOKEN"
+  | "AUTH"
+  | "RATE_LIMIT"
+  | "OFFLINE"
+  | "BAD_RESPONSE"
+  | "CREDENTIALS_CHANGED"
+  | "INTERNAL"
 
 export type ErrorCode = "NO_TOKEN" | "INVALID_JSON" | "EMPTY_USAGE" | "INVALID_PERCENT" | "FETCH_FAILED"
 
@@ -52,16 +67,24 @@ export function normalizeLocale(input?: string | null): Locale {
   return typeof input === "string" && input.toLowerCase().startsWith("ru") ? "ru" : "en"
 }
 
+/** Canonical labels are presentation-free identifiers; localized labels live in src/i18n. */
 export const WINDOWS = [
-  { key: "rolling", label: "5h", labels: { ru: "5ч", en: "5h" } },
-  { key: "weekly", label: "1w", labels: { ru: "1нед", en: "1w" } },
-  { key: "monthly", label: "1m", labels: { ru: "1мес", en: "1m" } },
+  { key: "rolling", label: "5h" },
+  { key: "weekly", label: "1w" },
+  { key: "monthly", label: "1m" },
 ] as const
 
 export const WINDOW_DURATION_MS: Record<WindowKey, number> = {
   rolling: 5 * 3_600_000,
   weekly: 7 * 86_400_000,
   monthly: 30 * 86_400_000,
+}
+
+export const WINDOW_BY_KEY = new Map<string, (typeof WINDOWS)[number]>(WINDOWS.map((w) => [w.key, w]))
+export const WINDOW_BY_LABEL = new Map<string, (typeof WINDOWS)[number]>(WINDOWS.map((w) => [w.label, w]))
+
+export function rowWindowKey(row: Pick<LimitRow, "key" | "label">): WindowKey | undefined {
+  return row.key ?? WINDOW_BY_LABEL.get(row.label)?.key
 }
 
 export function windowElapsedRatio(row: Pick<LimitRow, "key" | "label" | "resetsAtMs">, now = Date.now()): number | null {
@@ -74,23 +97,6 @@ export function windowElapsedRatio(row: Pick<LimitRow, "key" | "label" | "resets
   if (remainingMs < 0) return 1
   if (remainingMs > durationMs) return 0
   return Math.min(1, Math.max(0, (durationMs - remainingMs) / durationMs))
-}
-
-export const WINDOW_BY_KEY = new Map<string, (typeof WINDOWS)[number]>(WINDOWS.map((w) => [w.key, w]))
-export const WINDOW_BY_LABEL = new Map<string, (typeof WINDOWS)[number]>(
-  WINDOWS.flatMap((w) => [
-    [w.labels.ru, w],
-    [w.labels.en, w],
-  ]),
-)
-
-export function rowWindowKey(row: Pick<LimitRow, "key" | "label">): WindowKey | undefined {
-  return row.key ?? WINDOW_BY_LABEL.get(row.label)?.key
-}
-
-export function windowLabel(row: Pick<LimitRow, "key" | "label">, lang: Locale = "en"): string {
-  const entry = (row.key ? WINDOW_BY_KEY.get(row.key) : undefined) ?? WINDOW_BY_LABEL.get(row.label)
-  return entry ? entry.labels[lang] : row.label
 }
 
 export type VisibleWindows = Record<WindowKey, boolean>
@@ -144,37 +150,10 @@ export function shouldHideStrip(rows: readonly LimitRow[], autoHideBelow = 0): b
   return rows.every((r) => r.used < autoHideBelow && r.status !== "limited")
 }
 
+/** Technical matching of auth failures in raw provider text; carries no user-facing copy. */
 export function isAuthError(text: string | undefined): boolean {
   const raw = (text ?? "").toLowerCase()
   return /\b(?:401|403)\b/.test(raw) || raw.includes("unauthorized") || raw.includes("forbidden")
-}
-
-export function formatError(code: ErrorCode | undefined, detail: string | undefined, lang: Locale = "en"): string {
-  switch (code) {
-    case "NO_TOKEN":
-      return lang === "ru"
-        ? "Нет токена OpenCode Go. Выполни: opencode auth login или задай OPENCODE_API_KEY"
-        : "No OpenCode Go token found. Run: opencode auth login or set OPENCODE_API_KEY"
-    case "INVALID_JSON":
-      return lang === "ru" ? "Некорректный JSON в ответе API" : "Invalid JSON in API response"
-    case "EMPTY_USAGE":
-      return lang === "ru" ? "Ответ API без данных об использовании" : "API response contains no usage data"
-    case "INVALID_PERCENT": {
-      const label = detail ? (WINDOW_BY_KEY.get(detail)?.labels[lang] ?? detail) : "?"
-      return lang === "ru" ? `Окно ${label}: некорректный процент` : `Window ${label}: invalid percent`
-    }
-    case "FETCH_FAILED": {
-      if (isAuthError(detail)) {
-        return lang === "ru"
-          ? "Токен OpenCode Go истёк или неверен. Выполни: opencode auth login (или обнови OPENCODE_API_KEY)"
-          : "OpenCode Go token is expired or invalid. Run: opencode auth login (or refresh OPENCODE_API_KEY)"
-      }
-      const cause = detail || (lang === "ru" ? "нет доступных учётных данных" : "no credentials available")
-      return lang === "ru" ? `Не удалось получить лимиты: ${cause}` : `Failed to load limits: ${cause}`
-    }
-    default:
-      return detail || (lang === "ru" ? "Неизвестная ошибка" : "Unknown error")
-  }
 }
 
 export function emptyCard(error: string): LimitCard {

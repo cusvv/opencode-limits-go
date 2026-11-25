@@ -7,14 +7,12 @@ import {
   type UsageSnapshot,
   type VisibleWindows,
   buildSparklinePoints,
-  displayPercent,
   estimateWindowPace,
   selectStripRows,
-  shortErrorLabel,
-  span,
   windowElapsedRatio,
-  windowLabel,
 } from "../core/index.ts"
+import { cardErrorText, displayPercent, shortErrorLabel, span, windowLabel } from "../present/index.ts"
+import { message } from "../i18n/index.ts"
 import type { BarPalette, StripDensity, StripResetMode } from "./stores.ts"
 
 export function amberText(light: boolean): string {
@@ -168,12 +166,12 @@ export function LimitsStrip(props: {
   const rows = () => selectStripRows(props.card?.rows ?? [], props.visible, props.stripMode ?? "selected")
   const effBars = () => props.showBars
   const effPercent = () => props.showPercent || !effBars()
-  const prefix = () => (props.lang === "ru" ? "лимиты" : "limits")
+  const prefix = () => message(props.lang, "card.limits")
   const metrics = () => DENSITY_METRICS[props.density ?? "normal"]
   const ariaLabel = () => {
-    const base = props.lang === "ru" ? "Лимиты OpenCode Go" : "OpenCode Go limits"
+    const base = message(props.lang, "strip.title")
     if (!props.card?.ok) {
-      return `${base}: ${props.ready ? shortErrorLabel(props.card?.error, props.lang) : "…"}`
+      return `${base}: ${props.ready ? shortErrorLabel(cardErrorText(props.card, props.lang), props.lang) : "…"}`
     }
     const summary = rows()
       .map((row) => {
@@ -182,7 +180,7 @@ export function LimitsStrip(props: {
         return `${windowLabel(row, props.lang)} ${pct}%${props.showRemaining ? " left" : ""}${reset}`
       })
       .join("; ")
-    return `${base}: ${summary}. ${props.lang === "ru" ? "Открыть подробности" : "Open details"}`
+    return `${base}: ${summary}. ${message(props.lang, "strip.openDetails")}`
   }
 
   const buttonStyle = () => {
@@ -203,7 +201,7 @@ export function LimitsStrip(props: {
         when={props.card?.ok}
         fallback={
           <span style={`color:${amberText(props.light)};`}>
-            {prefix()}: {props.ready ? shortErrorLabel(props.card?.error, props.lang) : "…"}
+            {prefix()}: {props.ready ? shortErrorLabel(cardErrorText(props.card, props.lang), props.lang) : "…"}
           </span>
         }
       >
@@ -212,7 +210,7 @@ export function LimitsStrip(props: {
             const nowMs = () => props.card?.checkedAtMs || Date.now()
             const hot = () =>
               (props.showPaceIcon ?? true) &&
-              estimateWindowPace(row, nowMs(), props.lang, props.card?.snapshots)?.kind === "hot"
+              estimateWindowPace(row, nowMs(), props.card?.snapshots)?.kind === "hot"
             const elapsed = () => (props.showElapsedTick ? windowElapsedRatio(row, nowMs()) : null)
             const resetHint = () => {
               const mode = props.stripReset ?? "exhausted"

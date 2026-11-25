@@ -1,4 +1,4 @@
-import { CodedError, type Locale, formatError } from "./types.ts"
+import { CodedError } from "./types.ts"
 
 export function redactSecrets(text: string): string {
   return text
@@ -22,9 +22,10 @@ export function redactSecrets(text: string): string {
     .replace(/\b(token|access_token|refresh_token|api_key|apikey|key)=([^&\s"'`]+)/gi, "$1=[REDACTED]")
 }
 
-export function errorText(error: unknown, lang: Locale = "en"): string {
+/** Redacted technical error text for logs and diagnostics; never UI copy. */
+export function errorText(error: unknown): string {
   if (error instanceof CodedError) {
-    return redactSecrets(formatError(error.code, error.detail, lang))
+    return redactSecrets(error.detail ? `${error.code}: ${error.detail}` : error.code)
   }
   const raw = error instanceof Error ? error.message : String(error)
   return redactSecrets(raw)
