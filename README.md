@@ -63,7 +63,7 @@ TUI is intentionally one line in the sidebar:
 
 ## Installation
 
-Requires **OpenCode v2.3.0+**, **Node.js >= 20.3** for local/CLI installs, and an active OpenCode Go credential (`opencode auth login` or `OPENCODE_API_KEY`).
+Requires **OpenCode v2.3.0+**, an active OpenCode Go credential (`opencode auth login` or `OPENCODE_API_KEY`), and **Node.js >= 20** for the server and Desktop GUI. The optional TUI entrypoint depends on `@opentui/core` and inherits its engines: **Node >= 26.4 or Bun >= 1.3.14**. CI runs on Node 24 to typecheck, test, and build, and does not execute the TUI runtime.
 
 ### Option 1: OpenCode CLI (recommended)
 
@@ -89,7 +89,7 @@ git clone https://github.com/cusvv/opencode-limits-go.git "$env:USERPROFILE\.con
 cd "$env:USERPROFILE\.config\opencode\local-plugins\opencode-limits-go"; npm install
 ```
 
-`npm install` is required for the TUI entrypoint (`solid-js` and `@opentui/solid`). The Desktop GUI bundle is prebuilt.
+`npm install` is required for the TUI entrypoint (`solid-js` and `@opentui/solid`). The Desktop GUI bundle is prebuilt. Server and Desktop need Node >= 20; the TUI runtime additionally requires `@opentui/core` engines (Node >= 26.4 or Bun >= 1.3.14).
 
 ### Option 3: Release archive
 
@@ -230,6 +230,8 @@ npm install
 npm test          # core + server + ui-state + present tests (contract, parity, alerts)
 npm run build     # typecheck server/TUI/GUI and rebuild dist/gui-experimental.cjs
 ```
+
+CI uses Node 24 on Linux, Windows, and macOS. It typechecks/tests/builds the plugin but does not launch the TUI runtime; local TUI use must satisfy `@opentui/core` engines (Node >= 26.4 or Bun >= 1.3.14).
 
 ### Project architecture
 

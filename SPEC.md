@@ -91,5 +91,5 @@ OpenCode v2.3+ plugin (Node >= 20.3) showing OpenCode Go quota (5h / 1w / 1m) in
 
 - No account switcher: only the first working credential is shown; multi-account is guarded in cache/history/alerts.
 - The updater verifies a SHA-256 manifest, not a cryptographic signature.
-- TUI needs `solid-js`/`@opentui/solid`; local installs must run `npm install`.
+- Runtime requirements differ: server + Desktop GUI need Node >= 20; the optional TUI entrypoint inherits `@opentui/core` engines (Node >= 26.4 or Bun >= 1.3.14) and needs `npm install` (`solid-js`/`@opentui/solid`). CI builds/tests on Node 24 without running TUI.
 - RPC exposure and auth are controlled by the OpenCode host.
